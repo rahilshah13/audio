@@ -1,0 +1,11 @@
+/*
+.venv
+!.gitignore
+!README.md
+!/data/*
+!/checkpoints/*
+!processing.py
+!model.py
+!inference.py
+*.bin
+*.pickle

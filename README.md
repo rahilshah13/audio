@@ -1,0 +1,3 @@
+- `pip install jax optax flax numpy scipy`
+- add youtube urls to `/data/urls.txt`; do not modify "DONE" entries.
+- `python3 model.py` and `python3 inference.py` can be run concurrently
