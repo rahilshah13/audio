@@ -1,19 +1,12 @@
-"""
-SUMMARY:
-Unified non-blocking CALM architecture featuring an optimized, fast-refreshing
-Matplotlib visualization dashboard showing a true zero-centered empirical activation 
-alignment profile per head (allowing blue tones) and second chunk window bounds in the title.
-"""
 import os, json, pickle, jax, optax, random, time, glob, re, tempfile
 import jax.numpy as jnp
 import numpy as np
 import matplotlib
-matplotlib.use('TkAgg') # Ensure an interactive, multi-threaded GUI backend
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 from flax import linen as nn
 
-# --- REFACTORED CORE MODEL SPECIFICATION ---
 class CALM(nn.Module):
     dim: int = 1024
     
@@ -102,11 +95,10 @@ def loss_fn(params, x, key):
     noised = x + jax.random.normal(jax.random.split(key)[0], x.shape) * 0.02
     return jnp.mean(jnp.square(model.apply({'params': params}, noised[:, :-1, :]) - x[:, 1:, :]))
 
-# --- COMPILING PIPELINES ---
+# ---
 model, key = CALM(), jax.random.PRNGKey(42)
 os.makedirs("checkpoints", exist_ok=True)
 params = model.init(key, jnp.zeros((1, 20, 88200)))['params']
-
 tx = optax.adam(2e-4)
 opt_state = tx.init(params)
 
@@ -116,7 +108,6 @@ def train_step(params, opt_state, batch, key):
     updates, opt_state = tx.update(grads, opt_state, params)
     return optax.apply_updates(params, updates), opt_state, loss
 
-# --- INITIALIZE MATPLOTLIB INTERACTIVE CONTROL DASHBOARD ---
 plt.ion()
 fig, axs = plt.subplots(1, 3, figsize=(18, 6.0))
 plt.subplots_adjust(bottom=0.22, top=0.88, wspace=0.32)
@@ -129,7 +120,6 @@ stat_text_obj = fig.suptitle(
     fontsize=12, fontweight='bold', y=0.96
 )
 
-# Column 1: Clean Raw Attention Matrix
 attn_matrix_placeholder = np.zeros((20, 20))
 heatmap = axs[0].imshow(attn_matrix_placeholder, vmin=0, vmax=1, cmap="magma", origin='lower')
 axs[0].set_title(f"Attention Matrix Profile (Head {current_active_head})", fontsize=10, pad=12, fontweight='bold')
@@ -139,24 +129,18 @@ axs[0].set_xticks(np.arange(20))
 axs[0].set_yticks(np.arange(20))
 fig.colorbar(heatmap, ax=axs[0], fraction=0.046, pad=0.04)
 
-# Column 2: Dominant Spectral Energy Distribution
 bar_positions = np.arange(20)
 freq_bars = axs[1].bar(bar_positions, np.ones(20)*10, color='#2cb2cb', edgecolor='black', alpha=0.85)
 axs[1].set_yscale('log')
 axs[1].set_ylim(10, 22050)
 axs[1].set_xlim(-0.5, 19.5)
 spectral_title_obj = axs[1].set_title("Dominant Spectral Energy Distribution\n[Source: Initializing...]", fontsize=10, pad=12, fontweight='bold')
-
-# Simple clean token frame index look
 axs[1].set_xlabel("Token Frame Window Index", fontsize=9, labelpad=8)
 axs[1].set_ylabel("Log Scale Frequency (Hz)", fontsize=9)
 axs[1].grid(True, which="both", ls="--", alpha=0.3)
 axs[1].set_xticks(np.arange(0, 21, 2))
 axs[1].set_xticklabels([str(i) for i in range(0, 21, 2)])
-
-# Column 3: Zero-Centered Feature Activation Alignment Map
 alignment_matrix_placeholder = np.zeros((20, 20))
-# CHANGED: Map dynamically scales from -1 to 1 to accommodate blue negative correlation structures
 alignment_heatmap = axs[2].imshow(alignment_matrix_placeholder, vmin=-1, vmax=1, cmap="coolwarm", origin='lower')
 axs[2].set_title("Empirical Feature Activation Alignment Profile", fontsize=10, pad=12, fontweight='bold')
 axs[2].set_xlabel("Token Step Contrast Space", fontsize=9)
@@ -188,11 +172,8 @@ for idx in range(8):
 
 plt.show(block=False)
 
-# --- TRACKING VALS FOR DYNAMIC LOSS SCALING ---
 max_observed_loss = -1e9
 min_observed_loss = 1e9
-
-# --- EXECUTION TRAJECTORY ---
 loader = sharded_memmap_loader(batch_size=4, seq_len=20)
 checkpoint_path = "checkpoints/checkpoint_run.pickle"
 
@@ -216,17 +197,14 @@ try:
             
             _, weights_tensor = model.apply({'params': params}, batch_data, return_attn=True)            
             
-            # Left Plot: Clean raw active attention weights
             active_weights = np.array(weights_tensor[0, current_active_head, :, :])
             heatmap.set_data(active_weights)
             
-            # CHANGED: Center the weights around zero to capture inverse/negative relationships (introducing BLUE elements)
             centered_weights = active_weights - np.mean(active_weights, axis=-1, keepdims=True)
             norm_centered = centered_weights / (np.linalg.norm(centered_weights, axis=-1, keepdims=True) + 1e-8)
             visualized_alignment = np.dot(norm_centered, norm_centered.T)
             alignment_heatmap.set_data(visualized_alignment)
             
-            # Middle Plot: Frequency feature structures
             raw_wave_sequence = np.array(batch_data[0])
             frequencies, musical_notes = analyze_acoustic_tokens(raw_wave_sequence)            
             
@@ -236,7 +214,6 @@ try:
                 txt_obj.set_text(note_str)
                 txt_obj.set_y(safe_freq * 1.1 if safe_freq > 20 else 12)
             
-            # Embedded the exact second chunks into the title text string header directly
             current_sample_title = list(step_urls)[0] if step_urls else "Unknown Source"
             window_end_sec = window_start_sec + 20
             spectral_title_obj.set_text(

@@ -1,6 +1,7 @@
 - `mkdir data;mkdir checkpoints; touch ./data/urls.txt`
 - `python3 -m venv .venv; source ./.venv/bin/activate`
 - `pip install jax optax flax numpy scipy`
+- `brew install python-tk`
 - add youtube urls to `/data/urls.txt`; do not modify "DONE" entries.
 - `brew install caffeinate`
 - `python3 model.py` and `python3 inference.py` can be run concurrently
