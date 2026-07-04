@@ -7,9 +7,11 @@
 - `python3 model.py` and `python3 inference.py` can be run concurrently
   
 ---
+<img width="1686" height="577" alt="image" src="https://github.com/user-attachments/assets/bdca5544-a2ff-4759-ae9d-ab93a17ad8fe" />
 
-<img width="1636" height="905" alt="image" src="https://github.com/user-attachments/assets/0914d77f-6669-4502-b6be-bb135e75fd33" />
-
-* **Red Squares (The Consensus):** In the left chart, most queries (rows 9–12 and 16–18) anchor heavily to **Key 6**. Because they share the exact same context provider, their resulting features merge into identical copycats, generating the solid red block-diagonal clusters on the right.
-* **Blue Dots (The Divergences):** The right chart flashes sharp blue squares at the intersections of **Tokens 1, 5, and 14**. In the left chart, these queries completely ignore the popular Key 6 and shoot backward to lock onto **Key 1**. Because this behavior opposes the global mean, centering the data exposes it as a strong negative correlation.
-* **The Blue Crosshair (Token 8):** A light-blue horizontal and vertical stripe cuts directly through **Index 8**. In the left chart, Row 8 ignores single-source peaks and instead smears its attention broadly across Keys 9 through 19. This unique, distributed footprint decouples it entirely from the rest of the sequence.
+* **Title Status Bar:** Displays the current training step, absolute reconstruction loss, noise injection scale, and distinct training URLs seen.
+* **Attention Matrix (H0–H7):** Visualizes per-head token routing patterns; enforces a lower-triangular causal mask where the y-axis (Query) map cannot look ahead into future x-axis (Key) tokens.
+* **Feature Alignment Profile:** Displays the self-similarity matrix ($XX^T$) of mean-centered, normalized attention vectors to identify structural convergence, phase grouping, or representation collapse.
+* **Parameter NTK Evolution:** Tracks the relative Frobenius norm deviation ($\Delta\Theta$) of the output projection weights against its initial state to track active feature learning vs. "lazy training" stagnation.
+* **Spectral Energy:** Maps the dominant frequency components (Hz) and estimated musical pitch classes across sequential audio tokens.
+* **Acoustic Registry Table:** Displays a log of processed audio chunks, pairing track URLs with their predicted musical scale and estimated BPM.
