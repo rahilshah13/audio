@@ -12,7 +12,7 @@
 --- 
 ### Model Architecture
 
-This autoregressive model takes an input sequence of audio tokens $x$ and projects them through a multi-head causal attention mechanism and feed-forward layer blocks to predict the next audio sequence:
+The model takes a sequence of audio tokens $x$ and projects them through a multi-head causal attention kernel and feed-forward layer blocks to predict the next audio sequence:
 
 $$f(x; \theta) = \mathbf{W}_{\text{up2}} \cdot \sigma \left( \mathbf{W}_{\text{up1}} \cdot \text{LN} \left( h + \text{FF}(h) \right) \right)$$
 
@@ -28,9 +28,9 @@ $$f(x; \theta) = \mathbf{W}_{\text{up2}} \cdot \sigma \left( \mathbf{W}_{\text{u
 
 ---
 
-### Empirical Neural Tangent Kernel (NTK)
+### Neural Tangent Kernel (NTK)
 
-The empirical NTK matrix $\Theta_t$ tracks how the network's output function generalizes and evolves at training step $t$ across two distinct input sequences, $x$ and $x'$, by measuring the geometric alignment of their parameter gradients:
+The NTK matrix $\Theta_t$ tracks how the network's output function generalizes and evolves at training step $t$ across two distinct input sequences, $x$ and $x'$, by measuring the geometric alignment of their parameter gradients:
 
 $$\Theta_t(x, x') = \sum_{k=1}^{P} \frac{\partial f(x; \theta_t)}{\partial \theta_k} \otimes \frac{\partial f(x'; \theta_t)}{\partial \theta_k}$$
 
