@@ -17,7 +17,7 @@ The model takes a sequence of audio tokens $x$ and projects them through a multi
 $$f(x; \theta) = \mathbf{W}_{\text{up2}} \cdot \sigma \left( \mathbf{W}_{\text{up1}} \cdot \text{LN} \left( h + \text{FF}(h) \right) \right)$$
 
 #### Symbol Key:
-* **$x$**: Input audio token tensor of shape $(B, T, C)$, represents the sequential audio waveform.
+* **$x$**: Input audio token tensor of shape $(B, T, C)$, representing the sequential audio waveform.
 * **$\theta$**: Flattened vector of all learnable weights and biases in the model at the current step.
 * **$f(x; \theta)$**: The forward-pass output predicting the next chronological audio slice.
 * **$h$**: The hidden representation vector emerging from the attention engine ($h = \text{Attention}(x) + x$).
