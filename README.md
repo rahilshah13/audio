@@ -19,13 +19,9 @@ $$f(x; \theta) = \mathbf{W}_{\text{up2}} \cdot \sigma \left( \mathbf{W}_{\text{u
 * **$\theta$**: Flattened vector of parameters at current step.
 * **$f(x; \theta)$**: The forward-pass output predicting the next audio slice.
 * **$h$**: The hidden representation emerging from the attention kernel ($h = \text{Attention}(x) + x$).
-* **$\text{FF}(h)$**: The feed-forward network block, defined as $\mathbf{W}_{\text{ff2}} \cdot \sigma(\mathbf{W}_{\text{ff1}} \cdot h)$.
 * **$\text{LN}$**: Layer Normalization operator applied across the latent feature dimension.
 * **$\sigma$**: The GELU (Gaussian Error Linear Unit)
 
-- weights of the layers `up_proj_1` and `up_proj_2`:
-
-$$ \mathbf{W}_{\text{up1}} , \mathbf{W}_{\text{up2}} $$ 
 
 
 ---
