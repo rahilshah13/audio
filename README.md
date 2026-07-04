@@ -22,9 +22,11 @@ $$f(x; \theta) = \mathbf{W}_{\text{up2}} \cdot \sigma \left( \mathbf{W}_{\text{u
 * **$\text{FF}(h)$**: The feed-forward network block, defined as $\mathbf{W}_{\text{ff2}} \cdot \sigma(\mathbf{W}_{\text{ff1}} \cdot h)$.
 * **$\text{LN}$**: Layer Normalization operator applied across the latent feature dimension.
 * **$\sigma$**: The GELU (Gaussian Error Linear Unit)
-* The weights of the output projection dense layers (`up_proj_1` and `up_proj_2`):
+
+- weights of the layers `up_proj_1` and `up_proj_2`:
 
 $$ \mathbf{W}_{\text{up1}} , \mathbf{W}_{\text{up2}} $$ 
+
 
 ---
 
