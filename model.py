@@ -1,15 +1,11 @@
 import os, json, pickle, jax, optax, random, time, glob, re, tempfile
 import jax.numpy as jnp
 import numpy as np
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
 from flax import linen as nn
+from dashboard import TrainingDashboard
 
 class CALM(nn.Module):
     dim: int = 1024
-    
     @nn.compact
     def __call__(self, x, return_attn: bool = False):
         x = nn.Dense(self.dim, name="down_proj_2")(nn.gelu(nn.Dense(2048, name="down_proj_1")(x)))        
@@ -21,7 +17,7 @@ class CALM(nn.Module):
         v = nn.Dense(self.dim, name="value")(x).reshape(B, T, num_heads, head_dim).swapaxes(1, 2)        
         scores = jnp.matmul(q, k.swapaxes(-2, -1)) / jnp.sqrt(head_dim)
         tril = jnp.tril(jnp.ones((T, T), dtype=bool))
-        mask = tril[None, None, :, :]  # Shape: (1, 1, T, T) to cleanly broadcast
+        mask = tril[None, None, :, :]
         scores = jnp.where(mask, scores, -1e9)
         attn_weights = jax.nn.softmax(scores, axis=-1)
         h = jnp.matmul(attn_weights, v).swapaxes(1, 2).reshape(B, T, C)
@@ -29,31 +25,10 @@ class CALM(nn.Module):
         h = nn.LayerNorm(name="ln_1")(h + x)
         ff = nn.Dense(self.dim, name="ff_2")(nn.gelu(nn.Dense(self.dim * 2, name="ff_1")(h)))
         out = nn.Dense(88200, name="up_proj_2")(nn.gelu(nn.Dense(2048, name="up_proj_1")(nn.LayerNorm(name="ln_2")(h + ff))))
-        
-        if return_attn:
-            return out, attn_weights
+        if return_attn: return out, attn_weights
         return out
 
-def hz_to_note(hz):
-    if hz < 16: return "Noise"
-    A4 = 440.0
-    notes = ['A', 'A#', 'B', 'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#']
-    h = round(12 * np.log2(hz / A4))
-    return f"{notes[h % 12]}{int(4 + (h + 9) // 12)}"
-
-def analyze_acoustic_tokens(batch_waveform, sr=44100):
-    freqs, notes = [], []
-    for token_idx in range(batch_waveform.shape[0]):
-        channel_0 = batch_waveform[token_idx, ::2]  # Extract left audio channel
-        fft_data = np.abs(np.fft.rfft(channel_0))
-        fft_freqs = np.fft.rfftfreq(len(channel_0), d=1.0/sr)
-        peak_idx = np.argmax(fft_data[1:]) + 1  # Ignore DC offset
-        dom_freq = fft_freqs[peak_idx]
-        freqs.append(dom_freq)
-        notes.append(hz_to_note(dom_freq))
-    return freqs, notes
-
-# --- METADATA STREAMING ENGINE ---
+# --- METADATA ---
 def sharded_memmap_loader(batch_size=4, seq_len=20, samples_per_sec=44100):
     meta_path = "data/audio_vault.meta.jsonl"
     if not os.path.exists(meta_path):
@@ -76,7 +51,7 @@ def sharded_memmap_loader(batch_size=4, seq_len=20, samples_per_sec=44100):
             total_sec = entry["num_samples"] / entry["sample_rate"]
             latents = []
             chosen_start_offset = random.uniform(0, total_sec - seq_len)
-            if len(start_seconds) == 0:  # Track index 0 for visualization
+            if len(start_seconds) == 0:
                 start_seconds.append(int(chosen_start_offset))
                 
             for i in range(seq_len):
@@ -91,141 +66,82 @@ def sharded_memmap_loader(batch_size=4, seq_len=20, samples_per_sec=44100):
             batch_urls.add(entry["url"])
         yield jnp.stack(batch), batch_urls, start_seconds[0]
 
-def loss_fn(params, x, key):
-    noised = x + jax.random.normal(jax.random.split(key)[0], x.shape) * 0.02
-    return jnp.mean(jnp.square(model.apply({'params': params}, noised[:, :-1, :]) - x[:, 1:, :]))
-
-# ---
+# ------------------------------ 
 model, key = CALM(), jax.random.PRNGKey(42)
 os.makedirs("checkpoints", exist_ok=True)
+checkpoint_path = "checkpoints/checkpoint_run.pickle"
 params = model.init(key, jnp.zeros((1, 20, 88200)))['params']
+
+if os.path.exists(checkpoint_path):
+    print(f"\n[SYSTEM] Found existing parameter checkpoint file at: {checkpoint_path}")
+    print("[SYSTEM] Synchronizing weights and resuming previous execution sequence...")
+    with open(checkpoint_path, "rb") as f:
+        params = pickle.load(f)
+else:
+    print("\n[SYSTEM] No previous checkpoints discovered. Commencing clean initialization parameters...")
+
+# Store initialization parameter state for NTK evaluation reference tracking
+initial_ntk_weights = np.array(params['up_proj_2']['kernel'])
+
 tx = optax.adam(2e-4)
 opt_state = tx.init(params)
 
+def loss_fn(params, x, key, noise_scale):
+    noised = x + jax.random.normal(jax.random.split(key)[0], x.shape) * noise_scale
+    return jnp.mean(jnp.square(model.apply({'params': params}, noised[:, :-1, :]) - x[:, 1:, :]))
+
 @jax.jit
-def train_step(params, opt_state, batch, key):
-    loss, grads = jax.value_and_grad(loss_fn)(params, batch, key)
+def train_step(params, opt_state, batch, key, noise_scale):
+    loss, grads = jax.value_and_grad(loss_fn)(params, batch, key, noise_scale)
     updates, opt_state = tx.update(grads, opt_state, params)
     return optax.apply_updates(params, updates), opt_state, loss
 
-plt.ion()
-fig, axs = plt.subplots(1, 3, figsize=(18, 6.0))
-plt.subplots_adjust(bottom=0.22, top=0.88, wspace=0.32)
-current_active_head = 0
-global_seen_urls = set()
 TOTAL_STEPS = 50000
-
-stat_text_obj = fig.suptitle(
-    "Initialization Mode | Step: 0 | Scaled Loss: -- | Unique Shards Covered: 0",
-    fontsize=12, fontweight='bold', y=0.96
-)
-
-attn_matrix_placeholder = np.zeros((20, 20))
-heatmap = axs[0].imshow(attn_matrix_placeholder, vmin=0, vmax=1, cmap="magma", origin='lower')
-axs[0].set_title(f"Attention Matrix Profile (Head {current_active_head})", fontsize=10, pad=12, fontweight='bold')
-axs[0].set_ylabel("Query Token Index (Target Context/Row Focus)", fontsize=9, labelpad=8)
-axs[0].set_xlabel("Key Token Index (Source Context)", fontsize=9, labelpad=8)
-axs[0].set_xticks(np.arange(20))
-axs[0].set_yticks(np.arange(20))
-fig.colorbar(heatmap, ax=axs[0], fraction=0.046, pad=0.04)
-
-bar_positions = np.arange(20)
-freq_bars = axs[1].bar(bar_positions, np.ones(20)*10, color='#2cb2cb', edgecolor='black', alpha=0.85)
-axs[1].set_yscale('log')
-axs[1].set_ylim(10, 22050)
-axs[1].set_xlim(-0.5, 19.5)
-spectral_title_obj = axs[1].set_title("Dominant Spectral Energy Distribution\n[Source: Initializing...]", fontsize=10, pad=12, fontweight='bold')
-axs[1].set_xlabel("Token Frame Window Index", fontsize=9, labelpad=8)
-axs[1].set_ylabel("Log Scale Frequency (Hz)", fontsize=9)
-axs[1].grid(True, which="both", ls="--", alpha=0.3)
-axs[1].set_xticks(np.arange(0, 21, 2))
-axs[1].set_xticklabels([str(i) for i in range(0, 21, 2)])
-alignment_matrix_placeholder = np.zeros((20, 20))
-alignment_heatmap = axs[2].imshow(alignment_matrix_placeholder, vmin=-1, vmax=1, cmap="coolwarm", origin='lower')
-axs[2].set_title("Empirical Feature Activation Alignment Profile", fontsize=10, pad=12, fontweight='bold')
-axs[2].set_xlabel("Token Step Contrast Space", fontsize=9)
-axs[2].set_xticks(np.arange(0, 20, 5))
-axs[2].set_yticks(np.arange(0, 20, 5))
-fig.colorbar(alignment_heatmap, ax=axs[2], fraction=0.046, pad=0.04)
-
-for ax in [axs[0], axs[2]]:
-    ax.tick_params(axis='both', which='major', labelsize=8)
-for ax in axs:
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-
-token_labels = [axs[1].text(i, 12, '', ha='center', va='bottom', fontsize=8, rotation=90, fontweight='medium') for i in range(20)]
-
-buttons = []
-def make_tab_callback(head_idx):
-    def change_active_head(event):
-        global current_active_head
-        current_active_head = head_idx
-        axs[0].set_title(f"Attention Matrix Profile (Head {current_active_head})", fontsize=10, pad=12, fontweight='bold')
-    return change_active_head
-
-for idx in range(8):
-    ax_btn = plt.axes([0.38 + idx * 0.035, 0.04, 0.03, 0.035])
-    btn = Button(ax_btn, f"H{idx}", color='#f0f0f0', hovercolor='#d0d0d0')
-    btn.on_clicked(make_tab_callback(idx))
-    buttons.append(btn)
-
-plt.show(block=False)
-
-max_observed_loss = -1e9
-min_observed_loss = 1e9
+global_seen_urls = set()
+board = TrainingDashboard(total_steps=TOTAL_STEPS)
 loader = sharded_memmap_loader(batch_size=4, seq_len=20)
-checkpoint_path = "checkpoints/checkpoint_run.pickle"
+
+# Track min/max loss boundaries for 0-1 scale calculation
+min_loss = float('inf')
+max_loss = float('-inf')
 
 print("\nExecuting Training Iterations. Dashboard running on optimized UI pass loops...\n")
 
 try:
     for step in range(1, TOTAL_STEPS + 1):
-        current_global_step = step
         batch_data, step_urls, window_start_sec = next(loader)
         global_seen_urls.update(step_urls)
+        step_noise_scale = float(random.uniform(0.01, 0.08))
         key, step_key = jax.random.split(key)        
-        params, opt_state, loss = train_step(params, opt_state, batch_data, step_key)        
+        params, opt_state, loss = train_step(params, opt_state, batch_data, step_key, step_noise_scale)        
         loss_val = float(loss)
-        max_observed_loss = max(max_observed_loss, loss_val)
-        min_observed_loss = min(min_observed_loss, loss_val)
-        denom = (max_observed_loss - min_observed_loss)
-        scaled_loss = (loss_val - min_observed_loss) / denom if denom > 1e-8 else 0.5
+        
+        # Track historical boundaries dynamically
+        if loss_val < min_loss: min_loss = loss_val
+        if loss_val > max_loss: max_loss = loss_val        
+        denom = max_loss - min_loss
+        scaled_loss = (loss_val - min_loss) / denom if denom > 1e-8 else 0.5
         
         if step % 10 == 0 or step == 1:
-            print(f"\rProgress: {(step / TOTAL_STEPS) * 100:6.2f}% | Step {step}/{TOTAL_STEPS} | Norm Loss: {scaled_loss:.4f}", end="", flush=True)            
-            
+            print(f"\rProgress: {(step / TOTAL_STEPS) * 100:6.2f}% | Step {step}/{TOTAL_STEPS} | Abs Loss: {loss_val:.4f} | Scaled Loss: {scaled_loss:.4f} | Noise Scale: {step_noise_scale:.3f}", end="", flush=True)            
             _, weights_tensor = model.apply({'params': params}, batch_data, return_attn=True)            
+            current_sample_title = list(step_urls)[0] if step_urls else "Unknown Source"            
             
-            active_weights = np.array(weights_tensor[0, current_active_head, :, :])
-            heatmap.set_data(active_weights)
+            # Extract current parameter state to evaluate the empirical NTK delta tracking
+            current_ntk_weights = np.array(params['up_proj_2']['kernel'])
             
-            centered_weights = active_weights - np.mean(active_weights, axis=-1, keepdims=True)
-            norm_centered = centered_weights / (np.linalg.norm(centered_weights, axis=-1, keepdims=True) + 1e-8)
-            visualized_alignment = np.dot(norm_centered, norm_centered.T)
-            alignment_heatmap.set_data(visualized_alignment)
-            
-            raw_wave_sequence = np.array(batch_data[0])
-            frequencies, musical_notes = analyze_acoustic_tokens(raw_wave_sequence)            
-            
-            for bar, freq, note_str, txt_obj in zip(freq_bars, frequencies, musical_notes, token_labels):
-                safe_freq = max(freq, 10)
-                bar.set_height(safe_freq)
-                txt_obj.set_text(note_str)
-                txt_obj.set_y(safe_freq * 1.1 if safe_freq > 20 else 12)
-            
-            current_sample_title = list(step_urls)[0] if step_urls else "Unknown Source"
-            window_end_sec = window_start_sec + 20
-            spectral_title_obj.set_text(
-                f"Dominant Spectral Energy [{window_start_sec}s - {window_end_sec}s]\nSource: {current_sample_title}"
+            board.update(
+                step=step, 
+                loss_val=loss_val, 
+                noise_scale=step_noise_scale, 
+                seen_count=len(global_seen_urls), 
+                weights_tensor=weights_tensor, 
+                raw_visual_waveform=np.array(batch_data[0]), 
+                sample_title=current_sample_title, 
+                window_start_sec=window_start_sec,
+                current_ntk=current_ntk_weights,
+                initial_ntk=initial_ntk_weights
             )
-            
-            stat_text_obj.set_text(
-                f"CALM Training Dashboard | Step: {step}/{TOTAL_STEPS} | Scaled Loss [0-1]: {scaled_loss:.4f} | Seen Sources: {len(global_seen_urls)}"
-            )
-            
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
             
         if step % 1000 == 0:
             with open(checkpoint_path, "wb") as f: 

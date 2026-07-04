@@ -7,5 +7,6 @@
 !processing.py
 !model.py
 !inference.py
+!dashboard.py
 *.bin
 *.pickle
