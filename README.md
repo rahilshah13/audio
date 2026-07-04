@@ -10,33 +10,33 @@
 <img width="1686" height="577" alt="image" src="https://github.com/user-attachments/assets/bdca5544-a2ff-4759-ae9d-ab93a17ad8fe" />
 
 --- 
-### Model Architecture
-
-The model takes a sequence of audio tokens $x$ and projects them through a multi-head causal attention kernel and feed-forward layer blocks to predict the next audio sequence:
+### Model
 
 $$f(x; \theta) = \mathbf{W}_{\text{up2}} \cdot \sigma \left( \mathbf{W}_{\text{up1}} \cdot \text{LN} \left( h + \text{FF}(h) \right) \right)$$
 
-#### Symbol Key:
-* **$x$**: Input audio token tensor of shape $(B, T, C)$, representing the sequential audio waveform.
-* **$\theta$**: Flattened vector of all learnable weights and biases in the model at the current step.
-* **$f(x; \theta)$**: The forward-pass output predicting the next chronological audio slice.
-* **$h$**: The hidden representation vector emerging from the attention engine ($h = \text{Attention}(x) + x$).
+#### Symbols:
+* **$x$**: Input tensor $(B, T, C)$, representing the sequential audio waveform.
+* **$\theta$**: Flattened vector of parameters at current step.
+* **$f(x; \theta)$**: The forward-pass output predicting the next audio slice.
+* **$h$**: The hidden representation emerging from the attention kernel ($h = \text{Attention}(x) + x$).
 * **$\text{FF}(h)$**: The feed-forward network block, defined as $\mathbf{W}_{\text{ff2}} \cdot \sigma(\mathbf{W}_{\text{ff1}} \cdot h)$.
 * **$\text{LN}$**: Layer Normalization operator applied across the latent feature dimension.
-* **$\sigma$**: The GELU (Gaussian Error Linear Unit) non-linear activation function.
-* **$\mathbf{W}_{\text{up1}}, \mathbf{W}_{\text{up2}}$**: The weight matrices of the output projection dense layers (`up_proj_1` and `up_proj_2`).
+* **$\sigma$**: The GELU (Gaussian Error Linear Unit)
+* The weights of the output projection dense layers (`up_proj_1` and `up_proj_2`):
+
+$$ \mathbf{W}_{\text{up1}} , \mathbf{W}_{\text{up2}} $$ 
 
 ---
 
 ### Neural Tangent Kernel (NTK)
 
-The NTK matrix $\Theta_t$ tracks how the network's output function generalizes and evolves at training step $t$ across two distinct input sequences, $x$ and $x'$, by measuring the geometric alignment of their parameter gradients:
+The NTK matrix $\Theta_t$ tracks how the network's output function generalizes and evolves at training step $t$ across two distinct input sequences, $x$ and $x'$, by computing the jacobian:
 
 $$\Theta_t(x, x') = \sum_{k=1}^{P} \frac{\partial f(x; \theta_t)}{\partial \theta_k} \otimes \frac{\partial f(x'; \theta_t)}{\partial \theta_k}$$
 
-#### Symbol Key:
+#### Symbols:
 * **$\Theta_t(x, x')$**: The Neural Tangent Kernel value evaluating the structural similarity between inputs $x$ and $x'$ at step $t$.
 * **$P$**: The total number of scalar parameters in the network.
 * **$\theta_k$**: An individual scalar parameter weight within the active model parameters $\theta_t$.
 * **$\frac{\partial f(x; \theta_t)}{\partial \theta_k}$**: The partial derivative (gradient Jacobian) of the model's prediction with respect to parameter $\theta_k$.
-* **$\otimes$**: The Kronecker (or outer) product tensor operator, which matches the multidimensional output channel features of the audio tokens.
+* **$\otimes$**: The Kronecker (or outer) product tensor operator, which matches the output features of the audio tokens.
