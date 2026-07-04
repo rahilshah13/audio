@@ -4,6 +4,7 @@ import numpy as np
 from flax import linen as nn
 from dashboard import TrainingDashboard
 
+
 class CALM(nn.Module):
     dim: int = 1024
     @nn.compact
@@ -29,7 +30,7 @@ class CALM(nn.Module):
         return out
 
 # --- METADATA ---
-def sharded_memmap_loader(batch_size=4, seq_len=20, samples_per_sec=44100):
+def sharded_memmap_loader(batch_size, seq_len=20, samples_per_sec=44100):
     meta_path = "data/audio_vault.meta.jsonl"
     if not os.path.exists(meta_path):
         os.makedirs("data", exist_ok=True)
@@ -67,89 +68,86 @@ def sharded_memmap_loader(batch_size=4, seq_len=20, samples_per_sec=44100):
         yield jnp.stack(batch), batch_urls, start_seconds[0]
 
 # ------------------------------ 
-model, key = CALM(), jax.random.PRNGKey(42)
-os.makedirs("checkpoints", exist_ok=True)
-checkpoint_path = "checkpoints/checkpoint_run.pickle"
-params = model.init(key, jnp.zeros((1, 20, 88200)))['params']
+if __name__ == "__main__":
+    model, key = CALM(), jax.random.PRNGKey(42)
+    os.makedirs("checkpoints", exist_ok=True)
+    checkpoint_path = "checkpoints/checkpoint_run.pickle"
+    params = model.init(key, jnp.zeros((1, 20, 88200)))['params']
 
-if os.path.exists(checkpoint_path):
-    print(f"\n[SYSTEM] Found existing parameter checkpoint file at: {checkpoint_path}")
-    print("[SYSTEM] Synchronizing weights and resuming previous execution sequence...")
-    with open(checkpoint_path, "rb") as f:
-        params = pickle.load(f)
-else:
-    print("\n[SYSTEM] No previous checkpoints discovered. Commencing clean initialization parameters...")
+    if os.path.exists(checkpoint_path):
+        print(f"\n[SYSTEM] Found existing parameter checkpoint file at: {checkpoint_path}")
+        print("[SYSTEM] Synchronizing weights and resuming previous execution sequence...")
+        with open(checkpoint_path, "rb") as f:
+            params = pickle.load(f)
+    else:
+        print("\n[SYSTEM] No previous checkpoints discovered. Commencing clean initialization parameters...")
 
-# Store initialization parameter state for NTK evaluation reference tracking
-initial_ntk_weights = np.array(params['up_proj_2']['kernel'])
+    initial_ntk_weights = np.array(params['up_proj_2']['kernel'])
 
-tx = optax.adam(2e-4)
-opt_state = tx.init(params)
+    tx = optax.adam(2e-4)
+    opt_state = tx.init(params)
 
-def loss_fn(params, x, key, noise_scale):
-    noised = x + jax.random.normal(jax.random.split(key)[0], x.shape) * noise_scale
-    return jnp.mean(jnp.square(model.apply({'params': params}, noised[:, :-1, :]) - x[:, 1:, :]))
+    def loss_fn(params, x, key, noise_scale):
+        noised = x + jax.random.normal(jax.random.split(key)[0], x.shape) * noise_scale
+        return jnp.mean(jnp.square(model.apply({'params': params}, noised[:, :-1, :]) - x[:, 1:, :]))
 
-@jax.jit
-def train_step(params, opt_state, batch, key, noise_scale):
-    loss, grads = jax.value_and_grad(loss_fn)(params, batch, key, noise_scale)
-    updates, opt_state = tx.update(grads, opt_state, params)
-    return optax.apply_updates(params, updates), opt_state, loss
+    @jax.jit
+    def train_step(params, opt_state, batch, key, noise_scale):
+        loss, grads = jax.value_and_grad(loss_fn)(params, batch, key, noise_scale)
+        updates, opt_state = tx.update(grads, opt_state, params)
+        return optax.apply_updates(params, updates), opt_state, loss
 
-TOTAL_STEPS = 50000
-global_seen_urls = set()
-board = TrainingDashboard(total_steps=TOTAL_STEPS)
-loader = sharded_memmap_loader(batch_size=4, seq_len=20)
+    TOTAL_STEPS = 100000
+    BATCH_SIZE = 16
+    global_seen_urls = set()
+    board = TrainingDashboard(total_steps=TOTAL_STEPS)
+    loader = sharded_memmap_loader(batch_size=BATCH_SIZE, seq_len=20)
 
-# Track min/max loss boundaries for 0-1 scale calculation
-min_loss = float('inf')
-max_loss = float('-inf')
+    # Track min/max loss boundaries for 0-1 scale calculation
+    min_loss = float('inf')
+    max_loss = float('-inf')
 
-print("\nExecuting Training Iterations. Dashboard running on optimized UI pass loops...\n")
+    print("\nExecuting Training Iterations. Dashboard running on optimized UI pass loops...\n")
 
-try:
-    for step in range(1, TOTAL_STEPS + 1):
-        batch_data, step_urls, window_start_sec = next(loader)
-        global_seen_urls.update(step_urls)
-        step_noise_scale = float(random.uniform(0.01, 0.08))
-        key, step_key = jax.random.split(key)        
-        params, opt_state, loss = train_step(params, opt_state, batch_data, step_key, step_noise_scale)        
-        loss_val = float(loss)
-        
-        # Track historical boundaries dynamically
-        if loss_val < min_loss: min_loss = loss_val
-        if loss_val > max_loss: max_loss = loss_val        
-        denom = max_loss - min_loss
-        scaled_loss = (loss_val - min_loss) / denom if denom > 1e-8 else 0.5
-        
-        if step % 10 == 0 or step == 1:
-            print(f"\rProgress: {(step / TOTAL_STEPS) * 100:6.2f}% | Step {step}/{TOTAL_STEPS} | Abs Loss: {loss_val:.4f} | Scaled Loss: {scaled_loss:.4f} | Noise Scale: {step_noise_scale:.3f}", end="", flush=True)            
-            _, weights_tensor = model.apply({'params': params}, batch_data, return_attn=True)            
-            current_sample_title = list(step_urls)[0] if step_urls else "Unknown Source"            
+    try:
+        for step in range(1, TOTAL_STEPS + 1):
+            batch_data, step_urls, window_start_sec = next(loader)
+            global_seen_urls.update(step_urls)
+            step_noise_scale = float(random.uniform(0.01, 0.08))
+            key, step_key = jax.random.split(key)        
+            params, opt_state, loss = train_step(params, opt_state, batch_data, step_key, step_noise_scale)        
+            loss_val = float(loss)        
+            if loss_val < min_loss: min_loss = loss_val
+            if loss_val > max_loss: max_loss = loss_val        
+            denom = max_loss - min_loss
+            scaled_loss = (loss_val - min_loss) / denom if denom > 1e-8 else 0.5
             
-            # Extract current parameter state to evaluate the empirical NTK delta tracking
-            current_ntk_weights = np.array(params['up_proj_2']['kernel'])
-            
-            board.update(
-                step=step, 
-                loss_val=loss_val, 
-                noise_scale=step_noise_scale, 
-                seen_count=len(global_seen_urls), 
-                weights_tensor=weights_tensor, 
-                raw_visual_waveform=np.array(batch_data[0]), 
-                sample_title=current_sample_title, 
-                window_start_sec=window_start_sec,
-                current_ntk=current_ntk_weights,
-                initial_ntk=initial_ntk_weights
-            )
-            
-        if step % 1000 == 0:
-            with open(checkpoint_path, "wb") as f: 
-                pickle.dump(params, f)
+            if step % 10 == 0 or step == 1:
+                print(f"\rProgress: {(step / TOTAL_STEPS) * 100:6.2f}% | Step {step}/{TOTAL_STEPS} | Abs Loss: {loss_val:.4f} | Scaled Loss: {scaled_loss:.4f} | Noise Scale: {step_noise_scale:.3f}", end="", flush=True)            
+                _, weights_tensor = model.apply({'params': params}, batch_data, return_attn=True)            
+                current_sample_title = list(step_urls)[0] if step_urls else "Unknown Source"                        
+                current_ntk_weights = np.array(params['up_proj_2']['kernel'])
                 
-except KeyboardInterrupt:
-    print("\nExecution safely interrupted by user request.")
-finally:
-    with open(checkpoint_path, "wb") as f: 
-        pickle.dump(params, f)
-    print("\nCheckpoints successfully synchronized with persistent volume structures.")
+                board.update(
+                    step=step, 
+                    loss_val=loss_val, 
+                    noise_scale=step_noise_scale, 
+                    seen_count=len(global_seen_urls), 
+                    weights_tensor=weights_tensor, 
+                    raw_visual_waveform=np.array(batch_data[0]), 
+                    sample_title=current_sample_title, 
+                    window_start_sec=window_start_sec,
+                    current_ntk=current_ntk_weights,
+                    initial_ntk=initial_ntk_weights
+                )
+                
+            if step % 1000 == 0:
+                with open(checkpoint_path, "wb") as f: 
+                    pickle.dump(params, f)
+                    
+    except KeyboardInterrupt:
+        print("\nExecution safely interrupted by user request.")
+    finally:
+        with open(checkpoint_path, "wb") as f: 
+            pickle.dump(params, f)
+        print("\nCheckpoints successfully synchronized with persistent volume structures.")

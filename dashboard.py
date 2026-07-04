@@ -39,7 +39,6 @@ def detect_musical_scale(notes):
     return best_scale
 
 def estimate_bpm(waveform, sr=44100):
-    """Dynamic BPM estimator utilizing temporal envelope autocorrelation loops."""
     envelope = np.abs(waveform[::100, 0])
     env_mean = np.mean(envelope)
     if env_mean < 1e-4: return 120.0
@@ -47,12 +46,10 @@ def estimate_bpm(waveform, sr=44100):
     centered = envelope - env_mean
     corr = np.correlate(centered, centered, mode='full')[len(centered)-1:]
     
-    # Focus search window within plausible structural limits (60 - 180 BPM)
     min_lag = int(sr * 60 / (100 * 180))
     max_lag = int(sr * 60 / (100 * 60))
     
     if min_lag >= len(corr) or max_lag >= len(corr) or min_lag == max_lag:
-        # Dynamic fallback variance calculation for white noise sequences
         return float(75 + int(np.var(waveform) * 1e5) % 95)
         
     peak_lag = np.argmax(corr[min_lag:max_lag]) + min_lag
@@ -65,22 +62,32 @@ class TrainingDashboard:
         self.total_steps = total_steps
         self.current_active_head = 0
         self.seq_len = seq_len
-        self.history_records = [["--", "--", "--"] for _ in range(8)] # Pre-fill rows
+        self.history_records = [["--", "--", "--"] for _ in range(8)]
         
         self.ntk_steps = []
         self.ntk_history = []
         
         plt.ion()
-        self.fig, self.axs = plt.subplots(
-            1, 6, figsize=(26, 5.5), 
-            gridspec_kw={'width_ratios': [1, 1, 1, 0.05, 1, 1.1]}
-        )
-        plt.subplots_adjust(bottom=0.24, top=0.82, wspace=0.48, left=0.04, right=0.96)
+        
+        # 1. Configured GridSpec to allow vertical stacking on the rightmost column
+        self.fig = plt.figure(figsize=(24, 7.5))
+        gs = self.fig.add_gridspec(2, 5, width_ratios=[1.1, 1.1, 1.4, 0.05, 1.5], height_ratios=[1.0, 1.0])
+        plt.subplots_adjust(bottom=0.18, top=0.86, wspace=0.45, hspace=0.45, left=0.04, right=0.96)
         
         self.stat_text_obj = self.fig.suptitle(
             "CALM Training Dashboard | Step: 0 | Abs Loss: -- | Noise Scale: --",
-            fontsize=11, fontweight='bold', y=0.95
+            fontsize=11, fontweight='bold', y=0.96
         )
+
+        # Build Subplots using the grid structure layout
+        ax_attn = self.fig.add_subplot(gs[:, 0])
+        ax_alignment = self.fig.add_subplot(gs[:, 1])
+        ax_ntk = self.fig.add_subplot(gs[:, 2])
+        ax_split = self.fig.add_subplot(gs[:, 3])
+        ax_spectral = self.fig.add_subplot(gs[0, 4])  # Top Right Stack
+        ax_registry = self.fig.add_subplot(gs[1, 4])  # Bottom Right Stack
+
+        self.axs = [ax_attn, ax_alignment, ax_ntk, ax_split, ax_spectral, ax_registry]
 
         # ================= ATTENTION CONFIGURATIONS =================
         attn_placeholder = np.zeros((seq_len, seq_len))
@@ -101,7 +108,7 @@ class TrainingDashboard:
         self.fig.colorbar(self.alignment_heatmap, ax=self.axs[1], fraction=0.046, pad=0.04)
 
         # ================= PARAMETER STRUCTURAL CONTEXT =================
-        self.ntk_line, = self.axs[2].plot([], [], color='#8b5cf6', linewidth=1.8, marker='o', markersize=3)
+        self.ntk_line, = self.axs[2].plot([], [], color='#8b5cf6', linewidth=1.8, marker='o', markersize=2)
         self.axs[2].set_title("Parameter NTK Evolution", fontsize=9, pad=18, fontweight='bold')
         self.axs[2].text(0.5, 1.04, "Tracks representation change vs. lazy training", 
                          transform=self.axs[2].transAxes, ha='center', fontsize=7, color='#64748b', style='italic')
@@ -128,9 +135,8 @@ class TrainingDashboard:
 
         # ================= HIGH-PERFORMANCE STATIC REGISTRY =================
         self.axs[5].axis('off')
-        self.axs[5].set_title("Acoustic Registry", fontsize=9, pad=10, fontweight='bold')
+        self.axs[5].set_title("Acoustic Registry", fontsize=9, pad=6, fontweight='bold')
         
-        # Instantiate the table layout exactly once upfront to optimize click loop callbacks
         headers = ["Source Track (Time)", "Scale Profile", "Est. BPM"]
         self.ui_table = self.axs[5].table(
             cellText=self.history_records, 
@@ -140,13 +146,12 @@ class TrainingDashboard:
         )
         self.ui_table.auto_set_font_size(False)
         self.ui_table.set_fontsize(7)
-        self.ui_table.scale(1.0, 1.3)
+        self.ui_table.scale(1.0, 1.1)
 
         for i in [0, 1, 2, 4]:
             self.axs[i].tick_params(axis='both', which='major', labelsize=7)
             if i != 2: self._strip_spines(self.axs[i])
 
-        # Instantiate persistent token text handles
         self.token_labels = [self.axs[4].text(i, 12, '', ha='center', va='bottom', fontsize=7, rotation=90) for i in range(seq_len)]
         self.buttons = []
         self._setup_buttons(num_heads)
@@ -164,25 +169,23 @@ class TrainingDashboard:
             def change_head(event):
                 self.current_active_head = h_idx
                 self._update_head_title()
-                self.fig.canvas.draw_idle() # High efficiency refresh trigger
+                self.fig.canvas.draw_idle()
             return change_head
 
         for idx in range(num_heads):
-            ax_btn = plt.axes([0.04 + idx * 0.03, 0.04, 0.026, 0.03])
+            # Repositioned activation selection UI panels slightly lower
+            ax_btn = plt.axes([0.04 + idx * 0.03, 0.03, 0.026, 0.03])
             btn = Button(ax_btn, f"H{idx}", color='#f8fafc', hovercolor='#e2e8f0')
             btn.on_clicked(make_callback(idx))
             self.buttons.append(btn)
 
     def _update_embedded_table_data(self):
-        """Mutates the existing table values directly to bypass layout re-calculation bottlenecking."""
         cells = self.ui_table.get_celld()
-        # Row 0 is the column header row, actual text values start at Row 1
         for row_idx, data_row in enumerate(self.history_records):
             for col_idx, text_val in enumerate(data_row):
                 cells[(row_idx + 1, col_idx)].get_text().set_text(text_val)
 
     def update(self, step, loss_val, noise_scale, seen_count, weights_tensor, raw_visual_waveform, sample_title, window_start_sec, current_ntk=None, initial_ntk=None):
-        # 1. Attention Heatmap Array Assignment
         active_weights = np.array(weights_tensor[0, self.current_active_head, :, :])
         self.heatmap.set_data(active_weights)
         
@@ -190,42 +193,34 @@ class TrainingDashboard:
         norm_centered = centered_weights / (np.linalg.norm(centered_weights, axis=-1, keepdims=True) + 1e-8)
         self.alignment_heatmap.set_data(np.dot(norm_centered, norm_centered.T))
         
-        # 2. Extract Acoustic Metrics & Handle Scale Analysis
         frequencies, musical_notes = analyze_acoustic_tokens(raw_visual_waveform)
         detected_scale = detect_musical_scale(musical_notes)
         estimated_bpm = estimate_bpm(raw_visual_waveform)
         
-        # Keep clean source trace alongside timestamp identifier
         clean_track_id = sample_title.split('=')[-1][:8] if '=' in sample_title else "Track"
         source_label = f"{clean_track_id} ({window_start_sec}s)"
         
-        # Shift history records down and append latest observation tracking metrics
         self.history_records.pop(0)
         self.history_records.append([source_label, detected_scale, f"{estimated_bpm:.0f}"])
         
-        # 3. Fast Spectral Bar/Text Updates
         for bar, freq, note_str, txt_obj in zip(self.freq_bars, frequencies, musical_notes, self.token_labels):
             safe_freq = max(freq, 10)
             bar.set_height(safe_freq)
             txt_obj.set_text(note_str)
             txt_obj.set_y(safe_freq * 1.15 if safe_freq > 20 else 12)
         
-        # 4. In-Place NTK Line Value Mutation
+        # 2. NTK Plot updates modified to preserve historical tracking lines without window slicing limits
         if current_ntk is not None and initial_ntk is not None:
             deviation = np.linalg.norm(current_ntk - initial_ntk) / (np.linalg.norm(initial_ntk) + 1e-8)
             self.ntk_steps.append(step)
             self.ntk_history.append(deviation)
-            
-            # Bound historical windows to keep render bounds lightweight
-            if len(self.ntk_steps) > 40:
-                self.ntk_steps.pop(0)
-                self.ntk_history.pop(0)
                 
             self.ntk_line.set_data(self.ntk_steps, self.ntk_history)
+            
+            # Dynamically adjust bounding bounds across the complete training history trajectory
             self.axs[2].set_xlim(min(self.ntk_steps), max(self.ntk_steps) + 1)
             self.axs[2].set_ylim(-0.005, max(self.ntk_history) * 1.2 + 0.01)
 
-        # 5. Global Metric Text Modifications
         self.spectral_sub_obj.set_text(f"[{window_start_sec}s - {window_start_sec + self.seq_len}s] | Current: {detected_scale}")
         self.stat_text_obj.set_text(
             f"CALM Training Dashboard  |  Step: {step}/{self.total_steps}  |  Abs Loss: {loss_val:.4f}  |  Noise Scale: {noise_scale:.3f}  |  Seen: {seen_count}"
