@@ -4,7 +4,6 @@ import numpy as np
 from flax import linen as nn
 from dashboard import TrainingDashboard
 
-
 class CALM(nn.Module):
     dim: int = 1024
     @nn.compact
@@ -29,7 +28,6 @@ class CALM(nn.Module):
         if return_attn: return out, attn_weights
         return out
 
-# --- METADATA ---
 def sharded_memmap_loader(batch_size, seq_len=20, samples_per_sec=44100):
     meta_path = "data/audio_vault.meta.jsonl"
     if not os.path.exists(meta_path):
@@ -67,7 +65,19 @@ def sharded_memmap_loader(batch_size, seq_len=20, samples_per_sec=44100):
             batch_urls.add(entry["url"])
         yield jnp.stack(batch), batch_urls, start_seconds[0]
 
-# ------------------------------ 
+def make_ntk_fn(model):
+    def model_forward_flat(params, x):
+        preds = model.apply({'params': params}, x)
+        return preds[:, :, :4].flatten()
+    
+    @jax.jit
+    def compute_ntk(params, x):
+        jac = jax.jacobian(model_forward_flat, argnums=0)(params, x)
+        jac_flat = jnp.concatenate([jnp.reshape(j, (j.shape[0], -1)) for j in jax.tree_util.tree_leaves(jac)], axis=-1)
+        return jnp.matmul(jac_flat, jac_flat.T)
+        
+    return compute_ntk
+
 if __name__ == "__main__":
     model, key = CALM(), jax.random.PRNGKey(42)
     os.makedirs("checkpoints", exist_ok=True)
@@ -82,7 +92,11 @@ if __name__ == "__main__":
     else:
         print("\n[SYSTEM] No previous checkpoints discovered. Commencing clean initialization parameters...")
 
-    initial_ntk_weights = np.array(params['up_proj_2']['kernel'])
+    ntk_probe_input = jax.random.normal(key, (1, 1, 88200))
+    ntk_calculator = make_ntk_fn(model)
+    
+    initial_true_ntk = ntk_calculator(params, ntk_probe_input)
+    current_true_ntk = np.array(initial_true_ntk)
 
     tx = optax.adam(2e-4)
     opt_state = tx.init(params)
@@ -103,9 +117,13 @@ if __name__ == "__main__":
     board = TrainingDashboard(total_steps=TOTAL_STEPS)
     loader = sharded_memmap_loader(batch_size=BATCH_SIZE, seq_len=20)
 
-    # Track min/max loss boundaries for 0-1 scale calculation
     min_loss = float('inf')
     max_loss = float('-inf')
+
+    # Vectors tracking timeline states to plot line metrics
+    hist_steps = []
+    hist_losses = []
+    hist_noise = []
 
     print("\nExecuting Training Iterations. Dashboard running on optimized UI pass loops...\n")
 
@@ -122,11 +140,17 @@ if __name__ == "__main__":
             denom = max_loss - min_loss
             scaled_loss = (loss_val - min_loss) / denom if denom > 1e-8 else 0.5
             
+            if step % 100 == 0:
+                current_true_ntk = np.array(ntk_calculator(params, ntk_probe_input))
+            
             if step % 10 == 0 or step == 1:
+                hist_steps.append(step)
+                hist_losses.append(loss_val)
+                hist_noise.append(step_noise_scale)
+
                 print(f"\rProgress: {(step / TOTAL_STEPS) * 100:6.2f}% | Step {step}/{TOTAL_STEPS} | Abs Loss: {loss_val:.4f} | Scaled Loss: {scaled_loss:.4f} | Noise Scale: {step_noise_scale:.3f}", end="", flush=True)            
                 _, weights_tensor = model.apply({'params': params}, batch_data, return_attn=True)            
                 current_sample_title = list(step_urls)[0] if step_urls else "Unknown Source"                        
-                current_ntk_weights = np.array(params['up_proj_2']['kernel'])
                 
                 board.update(
                     step=step, 
@@ -137,8 +161,11 @@ if __name__ == "__main__":
                     raw_visual_waveform=np.array(batch_data[0]), 
                     sample_title=current_sample_title, 
                     window_start_sec=window_start_sec,
-                    current_ntk=current_ntk_weights,
-                    initial_ntk=initial_ntk_weights
+                    current_ntk=current_true_ntk,
+                    initial_ntk=initial_true_ntk,
+                    loss_history=hist_losses,
+                    step_history=hist_steps,
+                    noise_history=hist_noise
                 )
                 
             if step % 1000 == 0:
