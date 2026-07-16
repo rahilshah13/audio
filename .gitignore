@@ -6,6 +6,7 @@
 !/checkpoints/*
 !processing.py
 !model.py
+!meta.py
 !inference.py
 !dashboard.py
 *.bin
