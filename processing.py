@@ -2,13 +2,19 @@ import os, json
 import numpy as np
 from scipy.io import wavfile
 from yt_dlp import YoutubeDL
+from spleeter.separator import Separator
 
 MAX_SHARD_BYTES = 500 * 1024 * 1024
 DATA_DIR = "data"
 URL_FILE = "data/urls.txt"
 META_PATH = "data/audio_vault.meta.jsonl"
+OUTPUT_DIR = "data/separated"
 
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Initialize Spleeter separator
+separator = Separator('spleeter:2stems')
 
 def get_current_shard_info():
     shard_idx = 0
@@ -37,7 +43,14 @@ if os.path.exists(URL_FILE):
                     info = ydl.extract_info(url, download=True)
                     wav_path = os.path.join(DATA_DIR, f"{info['id']}.wav")
                 
-                sr, data = wavfile.read(wav_path)
+                # Apply Spleeter separation
+                # This will create a folder in OUTPUT_DIR with the video ID containing vocals.wav and accompaniment.wav
+                separator.separate_to_file(wav_path, OUTPUT_DIR)
+                
+                # Process the vocal track (you can change this to 'accompaniment.wav' if preferred)
+                vocal_path = os.path.join(OUTPUT_DIR, info['id'], "vocals.wav")
+                sr, data = wavfile.read(vocal_path)
+                
                 if data.ndim == 1: 
                     data = data[:, None].repeat(2, axis=1)
                 
