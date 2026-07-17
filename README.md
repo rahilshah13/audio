@@ -60,3 +60,28 @@ $$\Delta W_{scaled} = \nabla L \odot P$$
 ---
 
 <img width="762" height="247" alt="image" src="https://github.com/user-attachments/assets/15c2c707-4096-4a8c-a527-c07fd0116e6f" />
+
+
+$$\Delta \theta_t = P(\xi_t; \phi) \odot \nabla L_t$$
+
+$$P = \sigma\left( \mathcal{M}_{\phi}(\xi_t) \right)$$
+
+$$\xi_t = \text{NTK}_t \oplus \delta_t$$
+
+$$\delta_t = \frac{\Vert{}\theta_t - \theta_{t-1}\Vert{}_2}{\Vert{}\theta_t\Vert{}_2 + \epsilon}$$
+
+$$\sigma(x) = 2.0 \cdot \left( \frac{1}{1 + e^{-x}} \right)$$
+
+* **$\Delta \theta_t$**: Modulated parameter update at step $t$.
+* **$P$**: Adaptive spectral preconditioner (scaling vector).
+* **$\xi_t$**: Input feature vector (concatenated curvature and drift).
+* **$\phi$**: Trainable parameters of the Meta-MLP.
+* **$\nabla L_t$**: Raw gradient of the loss function.
+* **$\odot$**: Element-wise (Hadamard) product.
+* **$\mathcal{M}_{\phi}$**: 2-layer GELU Meta-MLP.
+* **$\text{NTK}_t$**: Flattened Neural Tangent Kernel (1024-dim local curvature).
+* **$\delta_t$**: Symmetry drift (internal parameter instability).
+* **$\theta_t$**: Main model parameter tensor.
+* **$\epsilon$**: Stability constant ($10^{-6}$) preventing division by zero.
+* **$\oplus$**: Concatenation operator.
+* **$\sigma$**: Scaling activation function.
