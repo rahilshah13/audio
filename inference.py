@@ -1,109 +1,46 @@
-import os, sys, glob, pickle, jax, json, random, re
+import os, sys, glob, pickle, jax, json, random, fcntl
 import jax.numpy as jnp
 import numpy as np
 import scipy.io.wavfile as wav
 
-try:
-    duration = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
-except ValueError:
-    duration = 10.0
+def load_checkpoint(path):
+    with open(path, "rb") as f:
+        fcntl.flock(f, fcntl.LOCK_SH)
+        params = pickle.load(f)
+        fcntl.flock(f, fcntl.LOCK_UN)
+    return params
 
-SR = 44100
-SEQ_LEN = 20 
-STEPS_NEEDED = int(np.ceil(duration))
-
-cps = sorted(glob.glob("checkpoints/checkpoint_run.pickle"), key=os.path.getmtime)
-if not cps: 
-    raise FileNotFoundError("No checkpoints found. Please run the training step first.")
-print(f"Loading weights from {cps[-1]}...")
-with open(cps[-1], "rb") as f: 
-    params = pickle.load(f)
-
-jaxpr_path = "checkpoints/model_jaxpr.pickle"
-if not os.path.exists(jaxpr_path):
-    raise FileNotFoundError(f"Missing JAXPR file at {jaxpr_path}. Ensure it was emitted by model.py.")
-print(f"Loading JAXPR from {jaxpr_path}...")
-with open(jaxpr_path, "rb") as f:
-    closed_jaxpr = pickle.load(f)
-
-meta_path = "data/audio_vault.meta.jsonl"
-if not os.path.exists(meta_path): 
-    raise FileNotFoundError("Missing data ledger.")
-with open(meta_path, "r") as f: 
-    metadata = [json.loads(l) for l in f if l.strip()]
-
-seed_latents = []
-while len(seed_latents) < SEQ_LEN:
-    entry = random.choice(metadata)
-    bin_path = os.path.join("data", entry["shard"])
-    if not os.path.exists(bin_path): 
-        continue
-    
-    mmap_data = np.memmap(bin_path, dtype=np.float32, mode='r').reshape(-1, 4)
-    offset_samples = entry["offset_bytes"] // 16
-    total_samples, sr = entry["num_samples"], entry["sample_rate"]
-    
-    if (total_samples / sr) <= SEQ_LEN: 
-        continue
-    start_sec = random.uniform(0, (total_samples / sr) - SEQ_LEN)
-    
-    seed_latents = []
-    for i in range(SEQ_LEN):
-        s_idx = offset_samples + int((start_sec + i) * sr)
-        chunk = mmap_data[s_idx : s_idx + sr]
+def get_seed(metadata, sr=44100, seq_len=20):
+    while True:
+        entry = random.choice(metadata)
+        path = os.path.join("data", entry["shard"])
+        if not os.path.exists(path): continue
+        mmap = np.memmap(path, dtype=np.float32, mode='r').reshape(-1, 4)
+        if (entry["num_samples"] / entry["sample_rate"]) <= seq_len: continue
         
-        if len(chunk) < sr:
-            padded = np.zeros((sr, 4), dtype=np.float32)
-            padded[:len(chunk)] = chunk
-            chunk = padded
-            
-        if sr != SR:
-            xp = np.linspace(0, 1, len(chunk))
-            xnew = np.linspace(0, 1, SR)
-            v_l = np.interp(xnew, xp, chunk[:, 0])
-            v_r = np.interp(xnew, xp, chunk[:, 1])
-            i_l = np.interp(xnew, xp, chunk[:, 2])
-            i_r = np.interp(xnew, xp, chunk[:, 3])
-            chunk = np.column_stack([v_l, v_r, i_l, i_r])
-        else:
-            if len(chunk) != SR:
-                padded = np.zeros((SR, 4), dtype=np.float32)
-                min_len = min(len(chunk), SR)
-                padded[:min_len] = chunk[:min_len]
-                chunk = padded
-                
-        seed_latents.append(chunk.flatten() / 32768.0)
+        start = int(random.uniform(0, (entry["num_samples"] / entry["sample_rate"]) - seq_len) * entry["sample_rate"])
+        off = entry["offset_bytes"] // 16
+        return [mmap[off + start + (i*sr) : off + start + (i+1)*sr].flatten() / 32768.0 for i in range(seq_len)]
 
-context = jnp.expand_dims(jnp.array(seed_latents), axis=0)
+def run():
+    dur = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
+    steps, sr = int(np.ceil(dur)), 44100
+    
+    params = load_checkpoint(sorted(glob.glob("checkpoints/checkpoint_run.pickle"), key=os.path.getmtime)[-1])
+    with open("checkpoints/model_jaxpr.pickle", "rb") as f: jaxpr = pickle.load(f)
+    with open("data/audio_vault.meta.jsonl", "r") as f: meta = [json.loads(l) for l in f if l.strip()]
 
-@jax.jit
-def run_jaxpr(p, x):
-    return jax.core.eval_jaxpr(closed_jaxpr.jaxpr, closed_jaxpr.consts, p, x)[0]
+    ctx = jnp.expand_dims(jnp.array(get_seed(meta)), axis=0)
+    gen = []
+    
+    for i in range(steps):
+        nxt = jax.core.eval_jaxpr(jaxpr.jaxpr, jaxpr.consts, params, ctx)[0][:, -1, :]
+        gen.append(np.array(nxt[0]))
+        ctx = jnp.concatenate([ctx[:, 1:, :], jnp.expand_dims(nxt, axis=1)], axis=1)
+        print(f"Step {i+1}/{steps}")
 
-generated = []
-print(f"Starting autoregressive inference for {duration} seconds using JAXPR...")
+    wav_data = (np.concatenate(gen)[:int(dur * sr)] * 32768.0).clip(-32768, 32767).astype(np.int16)
+    wav.write(f"vocals_{int(dur)}s.wav", sr, wav_data[:, :2])
+    wav.write(f"inst_{int(dur)}s.wav", sr, wav_data[:, 2:])
 
-for step in range(STEPS_NEEDED):
-    out = run_jaxpr(params, context)
-    nxt = out[:, -1, :] 
-    generated.append(np.array(nxt[0]))    
-    context = jnp.concatenate([context[:, 1:, :], jnp.expand_dims(nxt, axis=1)], axis=1)
-    print(f"Generated second {step + 1}/{STEPS_NEEDED}")
-
-waveform = np.concatenate(generated).reshape(-1, 4) * 32768.0
-waveform = waveform[:int(duration * SR)] 
-
-vocals = waveform[:, :2]
-instrumentals = waveform[:, 2:]
-
-vocals_out = np.clip(vocals, -32768, 32767).astype(np.int16)
-inst_out = np.clip(instrumentals, -32768, 32767).astype(np.int16)
-
-out_vocals_name = f"generated_vocals_{int(duration)}s.wav"
-out_inst_name = f"generated_instrumentals_{int(duration)}s.wav"
-
-wav.write(out_vocals_name, SR, vocals_out)
-wav.write(out_inst_name, SR, inst_out)
-
-print(f"Saved generated vocals to: {out_vocals_name}")
-print(f"Saved generated instrumentals to: {out_inst_name}")
+if __name__ == "__main__": run()
