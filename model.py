@@ -1,11 +1,10 @@
 import os, json, pickle, jax, optax, random, time, numpy as np
 import jax.numpy as jnp
 from functools import partial
-from meta import get_calm_params_from_ntk_trajectory
+from meta import get_meta_preconditioner
 import fcntl 
 
 STATE_FILE = "data/global_state.json"
-GRADIENT_STORE = "checkpoints/accumulated_gradients.pickle"
 
 def gpt_forward(params, x, n_heads=16):
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
@@ -43,9 +42,6 @@ def init_params(key, dim=4096):
         'up_proj_2': jax.random.normal(keys[8], (8192, 176400))
     }
 
-def normalize_loss(loss, scale=0.5):
-    return 1.0 - np.exp(-loss / scale)
-
 def read_global_state():
     os.makedirs("data", exist_ok=True)
     if not os.path.exists(STATE_FILE): return {"processed_windows": []} 
@@ -75,7 +71,7 @@ def push_and_pull_gradients(local_grads, accumulation_steps=1000):
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
         try: shared_data = pickle.load(f)
-        except Exception: shared_data = {"accumulated_grads": None, "count": 0}
+        except: shared_data = {"accumulated_grads": None, "count": 0}
         if shared_data["accumulated_grads"] is None: shared_data["accumulated_grads"] = local_grads
         else: shared_data["accumulated_grads"] = jax.tree_util.tree_map(lambda x, y: x + y, shared_data["accumulated_grads"], local_grads)
         shared_data["count"] += 1
@@ -88,23 +84,24 @@ def push_and_pull_gradients(local_grads, accumulation_steps=1000):
     if apply_global_update:
         with open(params_store_path, "r+b") as pf:
             fcntl.flock(pf, fcntl.LOCK_EX)
-            global_params = pickle.load(pf)
-            meta_params = get_calm_params_from_ntk_trajectory(multiplier=1.05)
-            if meta_params: global_params = meta_params
+            params = pickle.load(pf)
+            preconditioner = get_meta_preconditioner(shared_grads)
+            if preconditioner:
+                shared_grads = jax.tree_util.tree_map(lambda g, p: g * p, shared_grads, preconditioner)
             tx = optax.adam(2e-4)
             opt_state_path = "checkpoints/opt_state.pickle"
-            opt_state = pickle.load(open(opt_state_path, "rb")) if os.path.exists(opt_state_path) else tx.init(global_params)
-            updates, new_opt_state = tx.update(shared_grads, opt_state, global_params)
-            global_params = optax.apply_updates(global_params, updates)
-            pf.seek(0); pf.truncate(); pickle.dump(global_params, pf)
+            opt_state = pickle.load(open(opt_state_path, "rb")) if os.path.exists(opt_state_path) else tx.init(params)
+            updates, new_opt_state = tx.update(shared_grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            pf.seek(0); pf.truncate(); pickle.dump(params, pf)
             pickle.dump(new_opt_state, open(opt_state_path, "wb"))
             fcntl.flock(pf, fcntl.LOCK_UN)
-            return global_params, True
+            return params, True
     with open(params_store_path, "rb") as pf:
         fcntl.flock(pf, fcntl.LOCK_SH)
-        global_params = pickle.load(pf)
+        params = pickle.load(pf)
         fcntl.flock(pf, fcntl.LOCK_UN)
-    return global_params, False
+    return params, False
 
 def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
     meta_path = "data/audio_vault.meta.jsonl"
@@ -127,15 +124,6 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
             batch.append(jnp.stack(latents))
         yield jnp.stack(batch), batch_urls
 
-def make_ntk_fn():
-    @jax.jit
-    def compute_ntk(params, x):
-        def model_forward_flat(p, x): return gpt_forward(p, x).flatten()
-        jac = jax.jacobian(model_forward_flat, argnums=0)(params, x)
-        flat_jac = jnp.concatenate([jnp.reshape(j, (j.shape[0], -1)) for j in jax.tree_util.tree_leaves(jac)], axis=-1)
-        return flat_jac @ flat_jac.T
-    return compute_ntk
-
 if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
     os.makedirs("checkpoints", exist_ok=True); os.makedirs("ntk_logs", exist_ok=True)
@@ -143,7 +131,6 @@ if __name__ == "__main__":
         with open("checkpoints/checkpoint_run.pickle", "wb") as f: pickle.dump(init_params(key), f)
     with open("checkpoints/checkpoint_run.pickle", "rb") as f: params = pickle.load(f)
     
-    ntk_calculator = make_ntk_fn()
     loader = daemon_memmap_loader(batch_size=1)
     
     @partial(jax.jit, static_argnames=['noise_scale'])
