@@ -1,14 +1,11 @@
-- `mkdir data;mkdir checkpoints; touch ./data/urls.txt`
-- `python3 -m venv .venv; source ./.venv/bin/activate`
-- `pip install jax optax flax numpy scipy spleeter`
-- `brew install python-tk libsndfile`
-- add youtube urls to `/data/urls.txt`; do not modify "DONE" entries.
-- `brew install caffeinate`
-- `python3 model.py` and `python3 inference.py` can be run concurrently
+* `mkdir -p data checkpoints; touch ./data/urls.txt`
+* `chmod +x setup-cdk.sh && ./setup-cdk.sh` (Initializes CDK project and AWS environment)
+* Add YouTube URLs to `/data/urls.txt` (do not modify "DONE" entries)
+* `docker build -t calm-env .` (Builds the containerized training environment)
+* `cdk bootstrap && cdk deploy` (Deploys the infrastructure to AWS)
+* `docker run --gpus all -p 8000:8000 -v $(pwd)/data:/app/data -v $(pwd)/checkpoints:/app/checkpoints calm-env` (Launches the training daemon)
+* The dashboard is served via HTTP at `http://localhost:8000/dashboard.png` (or your AWS load balancer URL)
   
----
-<img width="1686" height="577" alt="image" src="https://github.com/user-attachments/assets/bdca5544-a2ff-4759-ae9d-ab93a17ad8fe" />
-
 --- 
 ### Model
 
