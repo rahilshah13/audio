@@ -15,8 +15,9 @@ def hz_to_note(hz):
 
 def analyze_acoustic_tokens(batch_waveform, sr=44100):
     freqs, notes = [], []
+    # Process using the vocal channels (0 and 1) for musical analysis
     for token_idx in range(batch_waveform.shape[0]):
-        channel_0 = batch_waveform[token_idx, ::2]
+        channel_0 = batch_waveform[token_idx, ::4] # Extracting V_L
         fft_data = np.abs(np.fft.rfft(channel_0))
         fft_freqs = np.fft.rfftfreq(len(channel_0), d=1.0/sr)
         peak_idx = np.argmax(fft_data[1:]) + 1
@@ -39,7 +40,8 @@ def detect_musical_scale(notes):
     return best_scale
 
 def estimate_bpm(waveform, sr=44100):
-    envelope = np.abs(waveform[::100, 0])
+    # Use channels 0 and 2 (V_L + I_L) to estimate rhythmic envelope
+    envelope = np.abs(waveform[::100, 0] + waveform[::100, 2])
     env_mean = np.mean(envelope)
     if env_mean < 1e-4: return 120.0
     
@@ -56,9 +58,8 @@ def estimate_bpm(waveform, sr=44100):
     bpm = (sr / 100) * 60 / peak_lag
     return float(np.clip(bpm, 60.0, 180.0))
 
-
 class TrainingDashboard:
-    def __init__(self, total_steps, num_heads=8, seq_len=20):
+    def __init__(self, total_steps, num_heads=16, seq_len=20):
         self.total_steps = total_steps
         self.current_active_head = 0
         self.seq_len = seq_len
@@ -68,7 +69,6 @@ class TrainingDashboard:
         plt.ion()
         
         self.fig = plt.figure(figsize=(26, 7.5))
-        # Re-partitioned gridspec from 6 columns to 7 columns to natively seat the loss plot
         gs = self.fig.add_gridspec(2, 7, width_ratios=[1.1, 1.1, 1.1, 1.3, 1.3, 0.05, 1.5], height_ratios=[1.0, 1.0])
         plt.subplots_adjust(bottom=0.18, top=0.86, wspace=0.52, hspace=0.45, left=0.03, right=0.97)
         self.stat_text_obj = self.fig.suptitle(
@@ -80,17 +80,16 @@ class TrainingDashboard:
         ax_alignment = self.fig.add_subplot(gs[:, 1])
         ax_batch_variance = self.fig.add_subplot(gs[:, 2]) 
         ax_ntk = self.fig.add_subplot(gs[:, 3])
-        ax_loss = self.fig.add_subplot(gs[:, 4])  # <-- Newly carved space for Loss Curves
+        ax_loss = self.fig.add_subplot(gs[:, 4])
         ax_split = self.fig.add_subplot(gs[:, 5])
         ax_spectral = self.fig.add_subplot(gs[0, 6])  
         ax_registry = self.fig.add_subplot(gs[1, 6])  
         self.axs = [ax_attn, ax_alignment, ax_batch_variance, ax_ntk, ax_loss, ax_split, ax_spectral, ax_registry]
 
-        # ================= SINGLE ELEMENT ATTENTION =================
         attn_placeholder = np.zeros((seq_len, seq_len))
         self.heatmap = self.axs[0].imshow(attn_placeholder, vmin=0, vmax=1, cmap="magma", origin='lower')
-        self.axs[0].set_ylabel("Query Token Index (Target Position)", fontsize=8, labelpad=4)
-        self.axs[0].set_xlabel("Key Token Index (Source Context)", fontsize=8, labelpad=4)
+        self.axs[0].set_ylabel("Query Token Index", fontsize=8, labelpad=4)
+        self.axs[0].set_xlabel("Key Token Index", fontsize=8, labelpad=4)
         self.axs[0].set_xticks(np.arange(0, seq_len, 4))
         self.axs[0].set_yticks(np.arange(0, seq_len, 4))
         self.fig.colorbar(self.heatmap, ax=self.axs[0], fraction=0.046, pad=0.04)
@@ -99,77 +98,58 @@ class TrainingDashboard:
         alignment_placeholder = np.zeros((seq_len, seq_len))
         self.alignment_heatmap = self.axs[1].imshow(alignment_placeholder, vmin=-1, vmax=1, cmap="coolwarm", origin='lower')
         self.axs[1].set_title("Profile Feature Alignment", fontsize=9, pad=18, fontweight='bold')
-        self.axs[1].text(0.5, 1.04, "Attention Cosine Similarity (Sample Index: 0)", 
-                         transform=self.axs[1].transAxes, ha='center', fontsize=7, color='#475569')
+        self.axs[1].text(0.5, 1.04, "Attention Cosine Similarity", transform=self.axs[1].transAxes, ha='center', fontsize=7, color='#475569')
         self.axs[1].set_xlabel("Query Token Index", fontsize=8)
         self.axs[1].set_ylabel("Query Token Index", fontsize=8)
         self.axs[1].set_xticks(np.arange(0, seq_len, 5))
         self.axs[1].set_yticks(np.arange(0, seq_len, 5))
         self.fig.colorbar(self.alignment_heatmap, ax=self.axs[1], fraction=0.046, pad=0.04)
 
-        # ================= BATCH ATTENTION VARIANCE =================
         batch_placeholder = np.zeros((seq_len, seq_len))
         self.batch_heatmap = self.axs[2].imshow(batch_placeholder, vmin=0, vmax=0.25, cmap="viridis", origin='lower')
         self.axs[2].set_title("Cross-Batch Attention Variance", fontsize=9, pad=18, fontweight='bold')
-        self.axs[2].text(0.5, 1.04, "Variance calculated across all batch items", 
-                         transform=self.axs[2].transAxes, ha='center', fontsize=7, color='#475569')
+        self.axs[2].text(0.5, 1.04, "Variance calculated across all batch items", transform=self.axs[2].transAxes, ha='center', fontsize=7, color='#475569')
         self.axs[2].set_xlabel("Key Token Index", fontsize=8)
         self.axs[2].set_ylabel("Query Token Index", fontsize=8)
         self.axs[2].set_xticks(np.arange(0, seq_len, 5))
         self.axs[2].set_yticks(np.arange(0, seq_len, 5))
         self.fig.colorbar(self.batch_heatmap, ax=self.axs[2], fraction=0.046, pad=0.04)
 
-        # ================= PARAMETER STRUCTURAL CONTEXT =================
         self.ntk_line, = self.axs[3].plot([], [], color='#8b5cf6', linewidth=1.8, marker='o', markersize=2)
         self.axs[3].set_title("Parameter NTK Evolution", fontsize=9, pad=18, fontweight='bold')
-        self.axs[3].text(0.5, 1.04, "Global Representation Change vs. Initial State", 
-                         transform=self.axs[3].transAxes, ha='center', fontsize=7, color='#64748b', style='italic')
+        self.axs[3].text(0.5, 1.04, "Global Representation Change", transform=self.axs[3].transAxes, ha='center', fontsize=7, color='#64748b', style='italic')
         self.axs[3].set_xlabel("Training Step", fontsize=8)
-        self.axs[3].set_ylabel(r"Relative NTK Deviation $\Delta\Theta$", fontsize=8)
+        self.axs[3].set_ylabel(r"$\Delta\Theta$", fontsize=8)
         self.axs[3].grid(True, ls=":", alpha=0.4)
 
-        # ================= TRAINING LOSS PROFILE =================
         self.loss_line, = self.axs[4].plot([], [], color='#ef4444', linewidth=1.5, label='Abs Loss')
         self.axs[4].set_title("Optimization Trajectory", fontsize=9, pad=18, fontweight='bold')
         self.axs[4].set_xlabel("Training Step", fontsize=8)
         self.axs[4].set_ylabel("Absolute Batch Loss", fontsize=8, color='#ef4444')
-        self.axs[4].tick_params(axis='y', labelcolor='#ef4444')
         self.axs[4].grid(True, ls=":", alpha=0.4)
 
-        # Secondary axis to visualize context switches with varying random noise ranges
         self.noise_ax = self.axs[4].twinx()
         self.noise_line, = self.noise_ax.plot([], [], color='#0ea5e9', linewidth=1.0, alpha=0.5, linestyle=':', label='Noise Scale')
         self.noise_ax.set_ylabel("Injected Noise Scale", fontsize=8, color='#0ea5e9')
-        self.noise_ax.tick_params(axis='y', labelcolor='#0ea5e9')
 
-        # ================= LAYOUT SPLIT BOUNDARY =================
         self.axs[5].axis('off')
         self.axs[5].axvline(x=0.5, color='#cbd5e1', linestyle='--', linewidth=1.2)
 
-        # ================= ACOUSTIC / AUDIO CONFIGURATIONS =================
         bar_positions = np.arange(seq_len)
         self.freq_bars = self.axs[6].bar(bar_positions, np.ones(seq_len)*10, color='#2cb2cb', edgecolor='black', alpha=0.8)
         self.axs[6].set_yscale('log')
         self.axs[6].set_ylim(10, 22050)
         self.axs[6].set_xlim(-0.5, seq_len - 0.5)
-        
         self.spectral_title_obj = self.axs[6].set_title("Acoustic Token Spectral Peaks", fontsize=9, pad=18, fontweight='bold')
         self.spectral_sub_obj = self.axs[6].text(0.5, 1.04, "", transform=self.axs[6].transAxes, ha='center', fontsize=7, color='#475569')
-        self.axs[6].set_xlabel("Sequence Step (1-Second Audio Tokens for Sample 0)", fontsize=8)
+        self.axs[6].set_xlabel("Sequence Step (Vocal Tokens)", fontsize=8)
         self.axs[6].set_ylabel("Dominant Peak Frequency (Hz)", fontsize=8)
         self.axs[6].grid(True, which="both", ls=":", alpha=0.4)
 
-        # ================= HIGH-PERFORMANCE STATIC REGISTRY =================
         self.axs[7].axis('off')
-        self.axs[7].set_title("Historical Stream Registry (Sample Index: 0)", fontsize=9, pad=6, fontweight='bold')
-        
-        headers = ["Source Track ID (Window Start)", "Detected Scale Mode", "Estimated Tempo (BPM)"]
-        self.ui_table = self.axs[7].table(
-            cellText=self.history_records, 
-            colLabels=headers, 
-            loc='center', 
-            cellLoc='center'
-        )
+        self.axs[7].set_title("Historical Stream Registry", fontsize=9, pad=6, fontweight='bold')
+        headers = ["Source Track ID (Window)", "Scale Mode", "BPM"]
+        self.ui_table = self.axs[7].table(cellText=self.history_records, colLabels=headers, loc='center', cellLoc='center')
         self.ui_table.auto_set_font_size(False)
         self.ui_table.set_fontsize(7)
         self.ui_table.scale(1.0, 1.1)
@@ -189,9 +169,7 @@ class TrainingDashboard:
         ax.spines['right'].set_visible(False)
 
     def _update_head_title(self):
-        self.axs[0].set_title(f"Attention Map Weight Matrix (H{self.current_active_head})", fontsize=9, pad=18, fontweight='bold')
-        self.axs[0].text(0.5, 1.04, "Extracted Slice from Batch Element Index: 0", 
-                         transform=self.axs[0].transAxes, ha='center', fontsize=7, color='#475569')
+        self.axs[0].set_title(f"Attention Map (H{self.current_active_head})", fontsize=9, pad=18, fontweight='bold')
 
     def _setup_buttons(self, num_heads):
         def make_callback(h_idx):
@@ -202,7 +180,10 @@ class TrainingDashboard:
             return change_head
 
         for idx in range(num_heads):
-            ax_btn = plt.axes([0.03 + idx * 0.03, 0.03, 0.026, 0.03])
+            # Dynamic layout for 16 heads
+            x_pos = 0.03 + (idx % 8) * 0.04
+            y_pos = 0.03 if idx < 8 else 0.07
+            ax_btn = plt.axes([x_pos, y_pos, 0.035, 0.03])
             btn = Button(ax_btn, f"H{idx}", color='#f8fafc', hovercolor='#e2e8f0')
             btn.on_clicked(make_callback(idx))
             self.buttons.append(btn)
@@ -250,7 +231,6 @@ class TrainingDashboard:
             self.axs[3].set_xlim(min(self.ntk_steps), max(self.ntk_steps) + 1)
             self.axs[3].set_ylim(-0.005, max(self.ntk_history) * 1.2 + 0.01)
 
-        # Update historical vectors for Loss Metrics
         if loss_history is not None and step_history is not None:
             self.loss_line.set_data(step_history, loss_history)
             self.axs[4].set_xlim(min(step_history), max(step_history) + 1)
@@ -260,10 +240,8 @@ class TrainingDashboard:
                 self.noise_line.set_data(step_history, noise_history)
                 self.noise_ax.set_ylim(0.0, max(noise_history) * 1.2 + 0.01)
 
-        self.spectral_sub_obj.set_text(f"Global Scale: {detected_scale} | Window Boundary: [{window_start_sec}s - {window_start_sec + self.seq_len}s]")
-        self.stat_text_obj.set_text(
-            f"CALM Training Dashboard  |  Step: {step}/{self.total_steps}  |  Abs Batch Loss: {loss_val:.4f}  |  Noise Scale: {noise_scale:.3f}  |  Unique Streams Seen: {seen_count}"
-        )
+        self.spectral_sub_obj.set_text(f"Global Scale: {detected_scale} | Boundary: [{window_start_sec}s]")
+        self.stat_text_obj.set_text(f"CALM Dashboard | Step: {step}/{self.total_steps} | Loss: {loss_val:.4f} | Noise: {noise_scale:.3f} | Streams: {seen_count}")
         
         self._update_embedded_table_data()
         self.fig.canvas.draw_idle()
