@@ -42,21 +42,6 @@ $$\Theta_t(x, x') = \sum_{k=1}^{P} \frac{\partial f(x; \theta_t)}{\partial \thet
 ---
 ### `meta.py` (Spectral Preconditioner)
 
-$$P = \sigma(\mathcal{M}_{\phi}(\text{NTK}_t[:1024])) \in \mathbb{R}^D$$
-
-$$\Delta W_{scaled} = \nabla L \odot P$$
-
-## Symbols:
-
-* **$P$**: The predicted spectral scaling vector (preconditioner) applied to the parameter gradients.
-* **$\text{NTK}_t[:1024]$**: The flattened, truncated Neural Tangent Kernel representation, serving as a spectral snapshot of the model's current curvature.
-* **$\mathcal{M}_{\phi}$**: The MLP meta-decoder parameterized by $\phi$, mapping the spectral snapshot to scaling coefficients.
-* **$\sigma$**: The Sigmoid activation function, constrained by a multiplier (e.g., $2.0$) to regulate update intensity.
-* **$\nabla L$**: The raw accumulated gradient vector (the "push" from the training daemon).
-* **$\odot$**: The element-wise product operator applying the spectral scaling to the gradients.
-* **$\Delta W_{scaled}$**: The final, preconditioned gradient update used by the optimizer to adjust $\theta$.
-* **$D$**: The total dimensionality of the model parameters.
-
 ---
 
 <img width="762" height="247" alt="image" src="https://github.com/user-attachments/assets/15c2c707-4096-4a8c-a527-c07fd0116e6f" />
