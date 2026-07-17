@@ -59,4 +59,4 @@ $$\Delta W_{scaled} = \nabla L \odot P$$
 
 ---
 
-<img width="370" height="159" alt="image" src="https://github.com/user-attachments/assets/a4aee13b-bbe0-4331-be77-6def9861f04e" />
+<img width="762" height="247" alt="image" src="https://github.com/user-attachments/assets/15c2c707-4096-4a8c-a527-c07fd0116e6f" />
