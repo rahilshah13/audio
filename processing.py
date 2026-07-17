@@ -13,7 +13,6 @@ OUTPUT_DIR = "data/separated"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Initialize Spleeter separator
 separator = Separator('spleeter:2stems')
 
 def get_current_shard_info():
@@ -43,37 +42,48 @@ if os.path.exists(URL_FILE):
                     info = ydl.extract_info(url, download=True)
                     wav_path = os.path.join(DATA_DIR, f"{info['id']}.wav")
                 
-                # Apply Spleeter separation
-                # This will create a folder in OUTPUT_DIR with the video ID containing vocals.wav and accompaniment.wav
                 separator.separate_to_file(wav_path, OUTPUT_DIR)
                 
-                # Process the vocal track (you can change this to 'accompaniment.wav' if preferred)
                 vocal_path = os.path.join(OUTPUT_DIR, info['id'], "vocals.wav")
-                sr, data = wavfile.read(vocal_path)
+                accomp_path = os.path.join(OUTPUT_DIR, info['id'], "accompaniment.wav")
                 
-                if data.ndim == 1: 
-                    data = data[:, None].repeat(2, axis=1)
+                sr_v, data_v = wavfile.read(vocal_path)
+                if data_v.ndim == 1: 
+                    data_v = data_v[:, None].repeat(2, axis=1)
                 
-                data_clean = data.astype(np.float32)
+                sr_a, data_a = wavfile.read(accomp_path)
+                if data_a.ndim == 1:
+                    data_a = data_a[:, None].repeat(2, axis=1)
+                
+                min_len = min(len(data_v), len(data_a))
+                data_v = data_v[:min_len]
+                data_a = data_a[:min_len]
+                
+                four_channel_data = np.hstack([data_v, data_a]).astype(np.float32)
                 
                 shard_idx, bin_path, current_bytes = get_current_shard_info()
                 
                 with open(bin_path, "ab") as bf:
-                    bf.write(data_clean.tobytes())
+                    bf.write(four_channel_data.tobytes())
                 
                 meta_entry = {
                     "shard": f"shard_{shard_idx}.bin",
                     "offset_bytes": current_bytes,
-                    "num_samples": len(data_clean),
-                    "sample_rate": sr,
+                    "num_samples": len(four_channel_data),
+                    "sample_rate": sr_v,
                     "url": url
                 }
                 with open(META_PATH, "a") as mf:
                     mf.write(json.dumps(meta_entry) + "\n")
 
                 os.remove(wav_path)
+                if os.path.exists(vocal_path): os.remove(vocal_path)
+                if os.path.exists(accomp_path): os.remove(accomp_path)
+                try: os.rmdir(os.path.join(OUTPUT_DIR, info['id']))
+                except Exception: pass
+
                 f.write(f"DONE: {url}\n")
-                print(f"Vaulted {info['id']} -> Shard {shard_idx}")
+                print(f"Vaulted dual-stem (4-Channels) {info['id']} -> Shard {shard_idx}")
 
             except Exception as e:
                 print(f"Error processing {url}: {e}")
