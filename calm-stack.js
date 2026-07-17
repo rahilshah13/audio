@@ -12,22 +12,22 @@ class CalmStack extends Stack {
     const vpc = new ec2.Vpc(this, 'CalmVpc', { maxAzs: 2 });
     const cluster = new ecs.Cluster(this, 'CalmCluster', { vpc });
 
-    // Enable Spot Capacity
-    cluster.addAsgCapacityProvider('SpotProvider', {
-      autoScalingGroup: cluster.addCapacity('ASG', {
-        instanceType: new ec2.InstanceType('g5.xlarge'),
-        spotPrice: '0.40', // Set a reasonable ceiling
-      }),
-      capacityProviderName: 'FARGATE_SPOT', // Or EC2 Spot logic
+    // Spot capacity setup
+    cluster.addCapacity('SpotCapacity', {
+      instanceType: new ec2.InstanceType('g5.xlarge'),
+      spotPrice: '0.40',
+      minCapacity: 1,
+      machineImage: ecs.EcsOptimizedImage.amazonLinux2023(),
     });
 
-    // Persistent EFS File System
-    const fileSystem = new efs.FileSystem(this, 'CalmEFS', { vpc });
-    const volName = 'PersistentData';
-    
+    const fileSystem = new efs.FileSystem(this, 'CalmEFS', { 
+      vpc, 
+      removalPolicy: RemovalPolicy.DESTROY 
+    });
+
     const taskDefinition = new ecs.Ec2TaskDefinition(this, 'CalmTask');
     taskDefinition.addVolume({
-      name: volName,
+      name: 'PersistentData',
       efsVolumeConfiguration: { fileSystemId: fileSystem.fileSystemId }
     });
 
@@ -36,18 +36,27 @@ class CalmStack extends Stack {
         directory: path.join(__dirname, '..'),
       })),
       memoryLimitMiB: 16384,
+      portMappings: [{ containerPort: 8000, hostPort: 8000 }],
     });
 
     container.addMountPoints({
       containerPath: '/app/data',
-      sourceVolume: volName,
+      sourceVolume: 'PersistentData',
       readOnly: false
     });
 
-    new ecs.Ec2Service(this, 'CalmService', {
+    // Create a service and explicitly open port 8000
+    const service = new ecs.Ec2Service(this, 'CalmService', {
       cluster,
       taskDefinition,
-      capacityProviderStrategies: [{ capacityProvider: 'EC2', weight: 1 }]
     });
+
+    // Directly allow traffic to the instances on port 8000
+    service.connections.securityGroups[0].addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(8000),
+      'Allow public access to dashboard'
+    );
   }
 }
+module.exports = { CalmStack };
