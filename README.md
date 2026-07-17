@@ -4,7 +4,7 @@
 * `docker build -t calm-env .` (Builds the containerized training environment)
 * `cdk bootstrap && cdk deploy` (Deploys the infrastructure to AWS)
 * `docker run --gpus all -p 8000:8000 -v $(pwd)/data:/app/data -v $(pwd)/checkpoints:/app/checkpoints calm-env` (Launches the training daemon)
-* The dashboard is served via HTTP at `http://localhost:8000/dashboard.png` (or your AWS load balancer URL)
+* The dashboard is served via HTTP at `http://localhost:8000/dashboard.png`
   
 --- 
 ### Model
