@@ -3,15 +3,13 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.io.wavfile as wav
 
-from model import CALM
-
 try:
     duration = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
 except ValueError:
     duration = 10.0
 
 SR = 44100
-SEQ_LEN = 20 # 20-second context window
+SEQ_LEN = 20 
 STEPS_NEEDED = int(np.ceil(duration))
 
 cps = sorted(glob.glob("checkpoints/checkpoint_run.pickle"), key=os.path.getmtime)
@@ -21,8 +19,12 @@ print(f"Loading weights from {cps[-1]}...")
 with open(cps[-1], "rb") as f: 
     params = pickle.load(f)
 
-inferred_dim = params['down_proj_2']['kernel'].shape[-1]
-print(f"Detected model hidden dimension from checkpoint: {inferred_dim}")
+jaxpr_path = "checkpoints/model_jaxpr.pickle"
+if not os.path.exists(jaxpr_path):
+    raise FileNotFoundError(f"Missing JAXPR file at {jaxpr_path}. Ensure it was emitted by model.py.")
+print(f"Loading JAXPR from {jaxpr_path}...")
+with open(jaxpr_path, "rb") as f:
+    closed_jaxpr = pickle.load(f)
 
 meta_path = "data/audio_vault.meta.jsonl"
 if not os.path.exists(meta_path): 
@@ -37,8 +39,8 @@ while len(seed_latents) < SEQ_LEN:
     if not os.path.exists(bin_path): 
         continue
     
-    mmap_data = np.memmap(bin_path, dtype=np.float32, mode='r').reshape(-1, 2)
-    offset_samples = entry["offset_bytes"] // 8
+    mmap_data = np.memmap(bin_path, dtype=np.float32, mode='r').reshape(-1, 4)
+    offset_samples = entry["offset_bytes"] // 16
     total_samples, sr = entry["num_samples"], entry["sample_rate"]
     
     if (total_samples / sr) <= SEQ_LEN: 
@@ -51,19 +53,21 @@ while len(seed_latents) < SEQ_LEN:
         chunk = mmap_data[s_idx : s_idx + sr]
         
         if len(chunk) < sr:
-            padded = np.zeros((sr, 2), dtype=np.float32)
+            padded = np.zeros((sr, 4), dtype=np.float32)
             padded[:len(chunk)] = chunk
             chunk = padded
             
         if sr != SR:
             xp = np.linspace(0, 1, len(chunk))
             xnew = np.linspace(0, 1, SR)
-            l_ch = np.interp(xnew, xp, chunk[:, 0])
-            r_ch = np.interp(xnew, xp, chunk[:, 1])
-            chunk = np.column_stack([l_ch, r_ch])
+            v_l = np.interp(xnew, xp, chunk[:, 0])
+            v_r = np.interp(xnew, xp, chunk[:, 1])
+            i_l = np.interp(xnew, xp, chunk[:, 2])
+            i_r = np.interp(xnew, xp, chunk[:, 3])
+            chunk = np.column_stack([v_l, v_r, i_l, i_r])
         else:
             if len(chunk) != SR:
-                padded = np.zeros((SR, 2), dtype=np.float32)
+                padded = np.zeros((SR, 4), dtype=np.float32)
                 min_len = min(len(chunk), SR)
                 padded[:min_len] = chunk[:min_len]
                 chunk = padded
@@ -72,21 +76,34 @@ while len(seed_latents) < SEQ_LEN:
 
 context = jnp.expand_dims(jnp.array(seed_latents), axis=0)
 
-model = CALM(dim=inferred_dim)
+@jax.jit
+def run_jaxpr(p, x):
+    return jax.core.eval_jaxpr(closed_jaxpr.jaxpr, closed_jaxpr.consts, p, x)[0]
+
 generated = []
-print(f"Starting autoregressive inference for {duration} seconds...")
+print(f"Starting autoregressive inference for {duration} seconds using JAXPR...")
 
 for step in range(STEPS_NEEDED):
-    out = model.apply({'params': params}, context)
-    nxt = out[:, -1, :] # Predict the final chronological step
+    out = run_jaxpr(params, context)
+    nxt = out[:, -1, :] 
     generated.append(np.array(nxt[0]))    
     context = jnp.concatenate([context[:, 1:, :], jnp.expand_dims(nxt, axis=1)], axis=1)
     print(f"Generated second {step + 1}/{STEPS_NEEDED}")
 
-waveform = np.concatenate(generated).reshape(-1, 2) * 32768.0
+waveform = np.concatenate(generated).reshape(-1, 4) * 32768.0
 waveform = waveform[:int(duration * SR)] 
-audio_out = np.clip(waveform, -32768, 32767).astype(np.int16)
 
-out_name = f"generated_output_{int(duration)}s.wav"
-wav.write(out_name, SR, audio_out)
-print(f"Saved generated sequence output to: {out_name}")
+vocals = waveform[:, :2]
+instrumentals = waveform[:, 2:]
+
+vocals_out = np.clip(vocals, -32768, 32767).astype(np.int16)
+inst_out = np.clip(instrumentals, -32768, 32767).astype(np.int16)
+
+out_vocals_name = f"generated_vocals_{int(duration)}s.wav"
+out_inst_name = f"generated_instrumentals_{int(duration)}s.wav"
+
+wav.write(out_vocals_name, SR, vocals_out)
+wav.write(out_inst_name, SR, inst_out)
+
+print(f"Saved generated vocals to: {out_vocals_name}")
+print(f"Saved generated instrumentals to: {out_inst_name}")
