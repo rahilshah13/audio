@@ -1,39 +1,50 @@
 import os, json, pickle, jax, optax, random, time, numpy as np
 import jax.numpy as jnp
-from flax import linen as nn
 from functools import partial
-from dashboard import TrainingDashboard
 from meta import get_calm_params_from_ntk_trajectory
 import fcntl 
 
-class CALM(nn.Module):
-    dim: int = 4096 
-    @nn.compact
-    def __call__(self, x, return_attn: bool = False):
-        x = nn.Dense(self.dim, name="down_proj_2")(nn.gelu(nn.Dense(8192, name="down_proj_1")(x)))        
-        B, T, C = x.shape
-        num_heads = 16
-        head_dim = self.dim // num_heads
-        q = nn.Dense(self.dim, name="query")(x).reshape(B, T, num_heads, head_dim).swapaxes(1, 2)
-        k = nn.Dense(self.dim, name="key")(x).reshape(B, T, num_heads, head_dim).swapaxes(1, 2)
-        v = nn.Dense(self.dim, name="value")(x).reshape(B, T, num_heads, head_dim).swapaxes(1, 2)        
-        scores = jnp.matmul(q, k.swapaxes(-2, -1)) / jnp.sqrt(head_dim)
-        tril = jnp.tril(jnp.ones((T, T), dtype=bool))
-        mask = tril[None, None, :, :]
-        scores = jnp.where(mask, scores, -1e9)
-        attn_weights = jax.nn.softmax(scores, axis=-1)
-        h = jnp.matmul(attn_weights, v).swapaxes(1, 2).reshape(B, T, C)
-        h = nn.LayerNorm(name="ln_1")(h + x)
-        ff = nn.Dense(self.dim, name="ff_2")(nn.gelu(nn.Dense(self.dim * 4, name="ff_1")(h)))
-        out = nn.Dense(176400, name="up_proj_2")(nn.gelu(nn.Dense(8192, name="up_proj_1")(nn.LayerNorm(name="ln_2")(h + ff))))
-        if return_attn: return out, attn_weights
-        return out
+STATE_FILE = "data/global_state.json"
+GRADIENT_STORE = "checkpoints/accumulated_gradients.pickle"
+
+def gpt_forward(params, x, n_heads=16):
+    x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
+    B, T, C = x.shape
+    head_dim = C // n_heads
+    
+    q = (x @ params['query']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
+    k = (x @ params['key']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
+    v = (x @ params['value']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
+    
+    scores = (q @ k.swapaxes(-2, -1)) / jnp.sqrt(head_dim)
+    mask = jnp.tril(jnp.ones((T, T), dtype=bool))[None, None, :, :]
+    scores = jnp.where(mask, scores, -1e9)
+    attn = jax.nn.softmax(scores, axis=-1) @ v
+    
+    h = attn.swapaxes(1, 2).reshape(B, T, C)
+    h = ((h + x) - jnp.mean(h + x, axis=-1, keepdims=True)) / jnp.sqrt(jnp.var(h + x, axis=-1, keepdims=True) + 1e-5)
+    
+    ff = jax.nn.gelu(h @ params['ff_1']) @ params['ff_2']
+    h_norm = ((h + ff) - jnp.mean(h + ff, axis=-1, keepdims=True)) / jnp.sqrt(jnp.var(h + ff, axis=-1, keepdims=True) + 1e-5)
+    
+    return jax.nn.gelu(h_norm @ params['up_proj_1']) @ params['up_proj_2']
+
+def init_params(key, dim=4096):
+    keys = jax.random.split(key, 10)
+    return {
+        'down_proj_1': jax.random.normal(keys[0], (dim, 8192)),
+        'down_proj_2': jax.random.normal(keys[1], (8192, dim)),
+        'query': jax.random.normal(keys[2], (dim, dim)),
+        'key': jax.random.normal(keys[3], (dim, dim)),
+        'value': jax.random.normal(keys[4], (dim, dim)),
+        'ff_1': jax.random.normal(keys[5], (dim, dim * 4)),
+        'ff_2': jax.random.normal(keys[6], (dim * 4, dim)),
+        'up_proj_1': jax.random.normal(keys[7], (dim, 8192)),
+        'up_proj_2': jax.random.normal(keys[8], (8192, 176400))
+    }
 
 def normalize_loss(loss, scale=0.5):
     return 1.0 - np.exp(-loss / scale)
-
-STATE_FILE = "data/global_state.json"
-GRADIENT_STORE = "checkpoints/accumulated_gradients.pickle"
 
 def read_global_state():
     os.makedirs("data", exist_ok=True)
@@ -116,27 +127,31 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
             batch.append(jnp.stack(latents))
         yield jnp.stack(batch), batch_urls
 
-def make_ntk_fn(model):
-    def model_forward_flat(params, x): return model.apply({'params': params}, x).flatten()
+def make_ntk_fn():
     @jax.jit
     def compute_ntk(params, x):
+        def model_forward_flat(p, x): return gpt_forward(p, x).flatten()
         jac = jax.jacobian(model_forward_flat, argnums=0)(params, x)
-        return jnp.matmul(jnp.concatenate([jnp.reshape(j, (j.shape[0], -1)) for j in jax.tree_util.tree_leaves(jac)], axis=-1), 
-                          jnp.concatenate([jnp.reshape(j, (j.shape[0], -1)) for j in jax.tree_util.tree_leaves(jac)], axis=-1).T)
+        flat_jac = jnp.concatenate([jnp.reshape(j, (j.shape[0], -1)) for j in jax.tree_util.tree_leaves(jac)], axis=-1)
+        return flat_jac @ flat_jac.T
     return compute_ntk
 
 if __name__ == "__main__":
-    model = CALM(); key = jax.random.PRNGKey(42)
+    key = jax.random.PRNGKey(42)
     os.makedirs("checkpoints", exist_ok=True); os.makedirs("ntk_logs", exist_ok=True)
     if not os.path.exists("checkpoints/checkpoint_run.pickle"):
-        with open("checkpoints/checkpoint_run.pickle", "wb") as f: pickle.dump(model.init(key, jnp.zeros((1, 10, 176400)))['params'], f)
+        with open("checkpoints/checkpoint_run.pickle", "wb") as f: pickle.dump(init_params(key), f)
     with open("checkpoints/checkpoint_run.pickle", "rb") as f: params = pickle.load(f)
-    ntk_calculator = make_ntk_fn(model)
+    
+    ntk_calculator = make_ntk_fn()
     loader = daemon_memmap_loader(batch_size=1)
+    
     @partial(jax.jit, static_argnames=['noise_scale'])
     def micro_step(params, batch, key, noise_scale):
         noised = batch + jax.random.normal(jax.random.split(key)[0], batch.shape) * noise_scale
-        return jnp.mean(jnp.square(model.apply({'params': params}, noised[:, :-1, :]) - batch[:, 1:, :])), jax.grad(lambda p: jnp.mean(jnp.square(model.apply({'params': p}, noised[:, :-1, :]) - batch[:, 1:, :])))(params)
+        loss_fn = lambda p: jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :]) - batch[:, 1:, :]))
+        return loss_fn(params), jax.grad(loss_fn)(params)
+        
     step = 1
     while True:
         try:
