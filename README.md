@@ -42,8 +42,6 @@ $$\Theta_t(x, x') = \sum_{k=1}^{P} \frac{\partial f(x; \theta_t)}{\partial \thet
 ---
 ### `meta.py` (Spectral Preconditioner)
 
----
-
 <img width="762" height="247" alt="image" src="https://github.com/user-attachments/assets/15c2c707-4096-4a8c-a527-c07fd0116e6f" />
 
 
