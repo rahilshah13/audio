@@ -6,9 +6,19 @@ import fcntl
 
 STATE_FILE = "data/global_state.json"
 
-def gpt_forward(params, x, n_heads=16):
+def gpt_forward(params, x, scale, bpm, n_heads=16):
+    # Initial projection
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
     B, T, C = x.shape
+    
+    # Feature Conditioning: Embed scale and project BPM
+    s_emb = params['scale_emb'][scale]  # [B, C]
+    b_emb = bpm[:, None] @ params['bpm_proj']  # [B, 1] @ [1, C] -> [B, C]
+    cond = jnp.expand_dims(s_emb + b_emb, 1)  # [B, 1, C]
+    
+    # Inject condition into the sequence
+    x = x + cond 
+    
     head_dim = C // n_heads
     
     q = (x @ params['query']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
@@ -29,7 +39,7 @@ def gpt_forward(params, x, n_heads=16):
     return jax.nn.gelu(h_norm @ params['up_proj_1']) @ params['up_proj_2']
 
 def init_params(key, dim=4096):
-    keys = jax.random.split(key, 10)
+    keys = jax.random.split(key, 12)
     return {
         'down_proj_1': jax.random.normal(keys[0], (dim, 8192)),
         'down_proj_2': jax.random.normal(keys[1], (8192, dim)),
@@ -39,7 +49,9 @@ def init_params(key, dim=4096):
         'ff_1': jax.random.normal(keys[5], (dim, dim * 4)),
         'ff_2': jax.random.normal(keys[6], (dim * 4, dim)),
         'up_proj_1': jax.random.normal(keys[7], (dim, 8192)),
-        'up_proj_2': jax.random.normal(keys[8], (8192, 176400))
+        'up_proj_2': jax.random.normal(keys[8], (8192, 176400)),
+        'scale_emb': jax.random.normal(keys[9], (128, dim)),  # Assumes scale is categorical (0-127)
+        'bpm_proj': jax.random.normal(keys[10], (1, dim))     # Projects continuous float BPM
     }
 
 def read_global_state():
@@ -110,7 +122,9 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
         if not os.path.exists(meta_path): time.sleep(2); continue
         with open(meta_path, "r") as f: metadata = [json.loads(l) for l in f if l.strip()]
         if not metadata: time.sleep(2); continue
-        batch, batch_urls = [], set()
+        
+        batch, batch_scales, batch_bpms = [], [], []
+        
         while len(batch) < batch_size:
             entry = random.choice(metadata)
             shard_path = os.path.join("data", entry["shard"])
@@ -118,11 +132,18 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
             mmap_pool[entry["shard"]] = np.memmap(shard_path, dtype=np.float32, mode='r').reshape(-1, 4)
             start_idx = int(random.uniform(0, (os.path.getsize(shard_path)//16 / entry["sample_rate"]) - seq_len) * entry["sample_rate"])
             window_id = f"{entry['shard']}:{start_idx}"
+            
             if window_id in read_global_state()["processed_windows"]: continue 
             register_global_window(window_id)
+            
             latents = [mmap_pool[entry["shard"]][(entry["offset_bytes"]//16)+start_idx+(i*samples_per_sec):(entry["offset_bytes"]//16)+start_idx+(i+1)*samples_per_sec].flatten() for i in range(seq_len)]
+            
             batch.append(jnp.stack(latents))
-        yield jnp.stack(batch), batch_urls
+            # Safely extract scale and bpm, defaulting if missing
+            batch_scales.append(int(entry.get("scale", 0)))
+            batch_bpms.append(float(entry.get("bpm", 120.0)))
+            
+        yield jnp.stack(batch), jnp.array(batch_scales, dtype=jnp.int32), jnp.array(batch_bpms, dtype=jnp.float32)
 
 if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
@@ -134,18 +155,20 @@ if __name__ == "__main__":
     loader = daemon_memmap_loader(batch_size=1)
     
     @partial(jax.jit, static_argnames=['noise_scale'])
-    def micro_step(params, batch, key, noise_scale):
+    def micro_step(params, batch, scales, bpms, key, noise_scale):
         noised = batch + jax.random.normal(jax.random.split(key)[0], batch.shape) * noise_scale
-        loss_fn = lambda p: jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :]) - batch[:, 1:, :]))
+        loss_fn = lambda p: jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :], scales, bpms) - batch[:, 1:, :]))
         return loss_fn(params), jax.grad(loss_fn)(params)
         
     step = 1
     while True:
         try:
-            b_data, _ = next(loader)
-            loss, grads = micro_step(params, b_data, key, 0.05)
+            b_data, b_scales, b_bpms = next(loader)
+            loss, grads = micro_step(params, b_data, b_scales, b_bpms, key, 0.05)
             params, global_updated = push_and_pull_gradients(grads, accumulation_steps=100)
             if global_updated:
                 print(f"[Step {step}] Update. Loss: {float(loss):.5f}")
                 step += 1
-        except Exception as e: print(e); time.sleep(1)
+        except Exception as e: 
+            print(e)
+            time.sleep(1)
