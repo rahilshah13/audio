@@ -139,7 +139,6 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
             latents = [mmap_pool[entry["shard"]][(entry["offset_bytes"]//16)+start_idx+(i*samples_per_sec):(entry["offset_bytes"]//16)+start_idx+(i+1)*samples_per_sec].flatten() for i in range(seq_len)]
             
             batch.append(jnp.stack(latents))
-            # Safely extract scale and bpm, defaulting if missing
             batch_scales.append(int(entry.get("scale", 0)))
             batch_bpms.append(float(entry.get("bpm", 120.0)))
             
@@ -154,20 +153,41 @@ if __name__ == "__main__":
     
     loader = daemon_memmap_loader(batch_size=1)
     
-    @partial(jax.jit, static_argnames=['noise_scale'])
-    def micro_step(params, batch, scales, bpms, key, noise_scale):
+    @partial(jax.jit, static_argnames=['noise_scale', 'max_inner_steps', 'tol'])
+    def train_step_until_zero(params, batch, scales, bpms, key, noise_scale, max_inner_steps=1000, tol=1e-7):
         noised = batch + jax.random.normal(jax.random.split(key)[0], batch.shape) * noise_scale
-        loss_fn = lambda p: jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :], scales, bpms) - batch[:, 1:, :]))
-        return loss_fn(params), jax.grad(loss_fn)(params)
         
+        def loss_fn(p):
+            return jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :], scales, bpms) - batch[:, 1:, :]))
+            
+        def condition_fun(state):
+            p, step_count, loss = state
+            return (step_count < max_inner_steps) & (loss > tol)
+
+        def body_fun(state):
+            p, step_count, loss = state
+            current_loss, grads = jax.value_and_grad(loss_fn)(p)
+            # Standard SGD internal update step for inner convergence loop
+            p = jax.tree_util.tree_map(lambda param, g: param - 1e-4 * g, p, grads)
+            return p, step_count + 1, current_loss
+
+        initial_loss, _ = jax.value_and_grad(loss_fn)(params)
+        final_params, final_steps, final_loss = jax.lax.while_loop(
+            condition_fun, body_fun, (params, 0, initial_loss)
+        )
+        
+        # Compute final gradients at the converged state for global accumulation
+        _, final_grads = jax.value_and_grad(loss_fn)(final_params)
+        return final_loss, final_grads
+
     step = 1
     while True:
         try:
             b_data, b_scales, b_bpms = next(loader)
-            loss, grads = micro_step(params, b_data, b_scales, b_bpms, key, 0.05)
+            loss, grads = train_step_until_zero(params, b_data, b_scales, b_bpms, key, 0.05)
             params, global_updated = push_and_pull_gradients(grads, accumulation_steps=100)
             if global_updated:
-                print(f"[Step {step}] Update. Loss: {float(loss):.5f}")
+                print(f"[Step {step}] Update. Converged Loss: {float(loss):.5f}")
                 step += 1
         except Exception as e: 
             print(e)
