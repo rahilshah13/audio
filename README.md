@@ -1,7 +1,6 @@
 * `mkdir -p data checkpoints; touch ./data/urls.txt`
 * `chmod +x setup-cdk.sh && ./setup-cdk.sh` (Initializes CDK project and AWS environment)
 * Add YouTube URLs to `/data/urls.txt` (do not modify "DONE" entries)
-* `python3 processing.py`
 * `docker build -t calm-env .` (Builds the containerized training environment)
 
 ### deploy
