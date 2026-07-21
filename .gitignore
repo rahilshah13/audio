@@ -1,6 +1,6 @@
 /*
-!calm-cdk/lib/calm-stack.js
 .venv
+!/calm-cdk/lib/calm-stack.js
 !.gitignore
 !README.md
 !/data/*
