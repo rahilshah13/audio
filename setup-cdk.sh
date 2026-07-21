@@ -1,6 +1,6 @@
 #!/bin/bash
 
-brew install node
+brew install node awscli
 npm install -g aws-cdk
 
 PROJECT_DIR="calm-cdk"

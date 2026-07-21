@@ -3,7 +3,11 @@
 * Add YouTube URLs to `/data/urls.txt` (do not modify "DONE" entries)
 * `python3 processing.py`
 * `docker build -t calm-env .` (Builds the containerized training environment)
-* `cdk bootstrap && cdk deploy` (Deploys the infrastructure to AWS)
+
+### deploy
+* `./setup-cdk.sh`
+* `aws configure`
+* `./calm-cdk/npx dotenv-cli -- cdk bootstrap && cdk deploy --profile`
 * `docker run --gpus all -p 8000:8000 -v $(pwd)/data:/app/data -v $(pwd)/checkpoints:/app/checkpoints calm-env` (Launches the training daemon)
 * The dashboard is served via HTTP at `http://localhost:8000/dashboard.png`
   

@@ -1,0 +1,8 @@
+__pycache__
+.venv/
+venv/
+calm-cdk/
+cdk.out/
+node_modules/
+.git/
+*.log
