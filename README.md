@@ -7,7 +7,6 @@
 * `./setup-cdk.sh`
 * `aws configure`
 * `./calm-cdk/npx dotenv-cli -- cdk bootstrap && cdk deploy --profile`
-* `docker run --gpus all -p 8000:8000 -v $(pwd)/data:/app/data -v $(pwd)/checkpoints:/app/checkpoints calm-env` (Launches the training daemon)
 * The dashboard is served via HTTP at `http://localhost:8000/dashboard.png`
   
 --- 
