@@ -73,6 +73,7 @@ $$\sigma(x) = 2.0 \cdot \left( \frac{1}{1 + e^{-x}} \right)$$
 * **$\sigma$**: Scaling activation function.
 
 ---
+
 Proposition: In the infinite-width limit, standard scaling laws collapse to NTK spectral bounds, mapping 1s audio diffusion inversion to kernel ridge regression governed by $E_{1\text{s}} \approx 0.1 \cdot \kappa(\Theta^\infty) \ln(1/\epsilon)$.
 
 Definition: $D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$ defines the minimum distinct data volume required to span the attention NTK degrees of freedom.
@@ -86,15 +87,28 @@ Definition: $D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$
 
 ---
 
-**Proof:**
 
-$$\begin{aligned} \text{(Kernel Ridge Regression)} \quad \hat{f} &= \arg\min_{f \in \mathcal{H}_{\Theta^\infty}} \frac{1}{N_{\text{songs}}} \sum_{i=1}^{N_{\text{songs}}} \left( y_i - f(x_i) \right)^2 + \lambda_{\text{reg}} \Vert{}f\Vert{}_{\mathcal{H}_{\Theta^\infty}}^2 \\ \text{(Spectral Expansion)} \quad \Theta^\infty(x, x') &= \sum_{j=1}^{\infty} \mu_j \phi_j(x) \phi_j(x') \\ \text{(Effective Dimensionality)} \quad d_{\text{eff}}(\lambda_{\text{reg}}) &= \text{Tr}\left( \Theta^\infty (\Theta^\infty + \lambda_{\text{reg}} I)^{-1} \right) \\ \text{(Generalization Bound)} \quad N_{\text{songs}} &\ge \frac{\text{Tr}(\Theta^\infty)}{\lambda_{\text{reg}}} \cdot \ln\left(\frac{1}{\epsilon}\right) \approx \mathcal{O}\left(\kappa(\Theta^\infty) \cdot d_{\text{attn}}\right) \end{aligned}$$
+$$\hat{f} = \arg\min_{f \in \mathcal{H}_{\Theta^\infty}} \frac{1}{N_{\text{songs}}} \sum_{i=1}^{N_{\text{songs}}} \left( y_i - f(x_i) \right)^2 + \lambda_{\text{reg}} \Vert{}f\Vert{}_{\mathcal{H}_{\Theta^\infty}}^2$$
+
+$$\text{\scriptsize (kernel ridge regression)}$$
+
+$$\Theta^\infty(x, x') = \sum_{j=1}^{\infty} \mu_j \phi_j(x) \phi_j(x')$$
+
+$$\text{\scriptsize (spectral expansion)}$$
+
+$$d_{\text{eff}}(\lambda_{\text{reg}}) = \text{Tr}\left( \Theta^\infty (\Theta^\infty + \lambda_{\text{reg}} I)^{-1} \right)$$
+
+$$\text{\scriptsize (effective dimensionality)}$$
+
+$$N_{\text{songs}} \ge \frac{\text{Tr}(\Theta^\infty)}{\lambda_{\text{reg}}} \cdot \ln\left(\frac{1}{\epsilon}\right) \approx \mathcal{O}\left(\kappa(\Theta^\infty) \cdot d_{\text{attn}}\right)$$
+
+$$\text{\scriptsize (generalization bound)}$$
 
 $\blacksquare$
 
 ---
 
-### Symbol Legend & Parameter Solutions
+### Symbols
 
 * $\Theta^\infty$: Attention NTK in the infinite-width limit.
 * $\mathcal{H}_{\Theta^\infty}$: Induced RKHS.
@@ -110,3 +124,6 @@ $\blacksquare$
 * **a) FFNN iterations ($T_{\text{sec}}$)**: $I_{\text{iter}}(T_{\text{sec}}) \approx 92 \cdot T_{\text{sec}}$ ($921$ iterations for $10\text{s}$).
 * **b) Attention head size**: $d_{\text{attn}} = 4096$ ($16$ heads, $d_{\text{head}} = 256$).
 * **c) Effective dataset size**: $N_{\text{sat}} \approx \mathcal{O}(10^5 \text{ samples} / 300\text{--}3000\text{ hours})$.
+
+---
+
