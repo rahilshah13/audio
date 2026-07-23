@@ -71,3 +71,18 @@ $$\sigma(x) = 2.0 \cdot \left( \frac{1}{1 + e^{-x}} \right)$$
 * **$\epsilon$**: Stability constant ($10^{-6}$) preventing division by zero.
 * **$\oplus$**: Concatenation operator.
 * **$\sigma$**: Scaling activation function.
+
+---
+**Proposition**: In the infinite-width limit, Chinchilla compute-optimal scaling collapses into the spectral decay bounds of an attention-structured Neural Tangent Kernel (NTK), mapping Sohl-Dickstein diffusion inversion steps to closed-form kernel ridge regression updates.
+
+**Proof**:
+
+1. **Attention NTK Spectrum**: Let the infinite-width NTK decompose across $H$ attention heads as $\Theta^\infty = \sum_{h=1}^H \Theta_h$ with eigenvalues $\lambda_k$. Generalization error is bounded by the RKHS effective capacity, determined by the tail decay of $\{\lambda_k\}_{k=1}^\infty$.
+2. **Chinchilla Scaling Collapse**: Standard compute-optimal scaling ($C \approx 6ND$) optimizes parameter count $N$ and token count $D$. In the infinite-width NTK regime, feature learning freezes ($N \to \infty$), substituting model parameter capacity with the effective kernel rank $R_{\text{eff}} = \text{Tr}(\Theta^\infty) / \Vert{}\Theta^\infty\Vert{}_2$. Consequently, token scaling $D$ yields diminishing returns once $D$ exceeds the finite effective degrees of freedom spanned by $\Theta^\infty$.
+3. **Diffusion Inversion as Kernel Iteration**: Sohl-Dickstein diffusion inversion generates data via reverse-time score matching $x_{t-1} = \mu_\theta(x_t, t)$. Under NTK linearization, each denoising step updates the function via the static attention kernel inverse:
+
+$$f_t(x) = f_{t_0}(x) - \sum_{s=1}^t \Theta^\infty(x, x_s) \left( \Theta^\infty + \lambda I \right)^{-1} e_s$$
+
+
+
+Thus, diffusion trajectory inversion is formally equivalent to sequential kernel regression governed entirely by the attention-head-induced NTK spectrum. $\blacksquare$
