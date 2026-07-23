@@ -83,7 +83,7 @@ Definition: $D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$
 1. **$f_s = 16\text{ kHz}$**: Uniform audio sampling baseline.
 2. **128-sample frames**: Temporal window $\Delta t = 8\text{ ms}$.
 3. **$125\text{ tokens/s}$**: Hop frequency $f_{\text{hop}} = 125\text{ Hz}$ (Nyquist rate).
-4. **$N_{\text{songs}} \ge 10^5$**: Minimum distinct compositional cardinality for zero-shot generalization.
+4. **$N_{\text{samples}} \ge 10^5$**: Minimum distinct compositional cardinality for zero-shot generalization.
 
 ---
 
@@ -119,11 +119,10 @@ $\blacksquare$
 * $\mu_j, \phi_j$: Eigenvalues and eigenfunctions.
 * $d_{\text{attn}}$: Internal attention feature dimension ($4096$).
 
-#### Parameter Solutions (8GB VRAM Constraint)
+#### Hyper-Parameters (8GB VRAM Constraint)
 
 * **a) FFNN iterations ($T_{\text{sec}}$)**: $I_{\text{iter}}(T_{\text{sec}}) \approx 92 \cdot T_{\text{sec}}$ ($921$ iterations for $10\text{s}$).
 * **b) Attention head size**: $d_{\text{attn}} = 4096$ ($16$ heads, $d_{\text{head}} = 256$).
-* **c) Effective dataset size**: $N_{\text{sat}} \approx \mathcal{O}(10^5 \text{ samples} / 300\text{--}3000\text{ hours})$.
 
 ---
 
