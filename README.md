@@ -114,9 +114,9 @@ $\blacksquare$
 * $\mu_j, \phi_j$: Eigenvalues and eigenfunctions.
 * $d_{\text{attn}}$: Internal attention feature dimension ($4096$).
 
-#### Hyper-Parameters (8GB VRAM Constraint)
+#### Hyper-Parameter Hypothesis (8GB VRAM Constraint)
 
-* **a) FFNN iterations ($T_{\text{sec}}$)**: $I_{\text{iter}}(T_{\text{sec}}) \approx 92 \cdot T_{\text{sec}}$ ($921$ iterations for $10\text{s}$).
+* **a) FFNN iterations ($T_{\text{sec}}$)**: $I_{\text{iter}}(T_{\text{sec}}) \approx 92 \cdot T_{\text{sec}}$ (900 - 9000 iterations to learn $10\text{s}$ of audio).
 * **b) Attention head size**: $d_{\text{attn}} = 4096$ ($16$ heads, $d_{\text{head}} = 256$).
 
 ---
