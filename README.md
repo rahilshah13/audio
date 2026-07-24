@@ -68,8 +68,7 @@ $$\sigma(x) = 2.0 \cdot \left( \frac{1}{1 + e^{-x}} \right)$$
 * **$\sigma$**: Scaling activation function.
 
 ---
-
-**Proposition:** In the infinite-width limit, empirical performance trends transition strictly to Neural Tangent Kernel eigenvalue bounds, mapping 1-second audio diffusion inversion to kernel ridge regression governed by
+**Proposition**: In the infinite-width limit, network dynamics converge to Neural Tangent Kernel (NTK) eigenvalue bounds, rendering 1-second audio diffusion-inversion training tractable via kernel ridge regression governed by
 
 
 $$E_{1\vert{}s} \approx 0.1 \cdot \kappa(\Theta^\infty) \ln(1/\epsilon)$$
