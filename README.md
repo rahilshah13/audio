@@ -1,13 +1,12 @@
 * `mkdir -p data checkpoints; touch ./data/urls.txt`
-* `chmod +x setup-cdk.sh && ./setup-cdk.sh` (Initializes CDK project and AWS environment)
-* Add YouTube URLs to `/data/urls.txt` (do not modify "DONE" entries)
-* `docker build -t calm-env .` (Builds the containerized training environment)
+* `chmod +x setup-cdk.sh && ./setup-cdk.sh`
+* `docker build -t calm-env .`
 
 ### deploy
 * `./setup-cdk.sh`
 * `aws configure`
 * `./calm-cdk/npx dotenv-cli -- cdk bootstrap && cdk deploy --profile`
-* The dashboard is served via HTTP at `http://localhost:8000/dashboard.png`
+* The dashboard is served at `http://localhost:8000/dashboard.png`
   
 --- 
 ### Model
