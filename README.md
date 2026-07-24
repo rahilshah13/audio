@@ -1,7 +1,3 @@
-* `mkdir -p data checkpoints; touch ./data/urls.txt`
-* `chmod +x setup-cdk.sh && ./setup-cdk.sh`
-* `docker build -t calm-env .`
-
 ### deploy
 * `./setup-cdk.sh`
 * `aws configure`
