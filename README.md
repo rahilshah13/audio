@@ -74,7 +74,7 @@ $$\sigma(x) = 2.0 \cdot \left( \frac{1}{1 + e^{-x}} \right)$$
 $$E_{1\vert{}s} \approx 0.1 \cdot \kappa(\Theta^\infty) \ln(1/\epsilon)$$
 
 **Definition:**
-$D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$ establishes the minimum distinct data volume required to span the attention Neural Tangent Kernel degrees of freedom.
+$D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$ establishes the minimum distinct data volume to span the attention Neural Tangent Kernel degrees of freedom.
 
 * **$f_s = 16$ kHz:** Uniform audio sampling baseline.
 * **128-sample frames:** Temporal window $\Delta t = 8$ ms.
@@ -121,3 +121,4 @@ $\blacksquare$
 
 ---
 
+<img width="1030" height="1218" alt="31775" src="https://github.com/user-attachments/assets/a912c32f-42b8-4a2a-a143-514299229300" />
