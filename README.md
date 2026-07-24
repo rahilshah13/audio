@@ -74,19 +74,20 @@ $$\sigma(x) = 2.0 \cdot \left( \frac{1}{1 + e^{-x}} \right)$$
 
 ---
 
-Proposition: In the infinite-width limit, standard scaling laws collapse to NTK spectral bounds, mapping 1s audio diffusion inversion to kernel ridge regression governed by $E_{1\text{s}} \approx 0.1 \cdot \kappa(\Theta^\infty) \ln(1/\epsilon)$.
+**Proposition:** In the infinite-width limit, empirical performance trends transition strictly to Neural Tangent Kernel eigenvalue bounds, mapping 1-second audio diffusion inversion to kernel ridge regression governed by
 
-Definition: $D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$ defines the minimum distinct data volume required to span the attention NTK degrees of freedom.
+
+$$E_{1\vert{}s} \approx 0.1 \cdot \kappa(\Theta^\infty) \ln(1/\epsilon)$$
+
+**Definition:**
+$D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$ establishes the minimum distinct data volume required to span the attention Neural Tangent Kernel degrees of freedom.
+
+* **$f_s = 16$ kHz:** Uniform audio sampling baseline.
+* **128-sample frames:** Temporal window $\Delta t = 8$ ms.
+* **125 tokens/s:** Sliding stride frequency $f_{\text{stride}} = 125$ Hz (reconstruction aliasing threshold).
+* **$N_{\text{samples}} \ge 10^5$:** Minimum distinct compositional cardinality for zero-shot generalization, beyond which the saturation of attention Neural Tangent Kernel degrees of freedom halts further reduction in inversion error.
 
 ---
-
-1. **$f_s = 16\text{ kHz}$**: Uniform audio sampling baseline.
-2. **128-sample frames**: Temporal window $\Delta t = 8\text{ ms}$.
-3. **$125\text{ tokens/s}$**: Hop frequency $f_{\text{hop}} = 125\text{ Hz}$ (Nyquist rate).
-4. **$N_{\text{samples}} \ge 10^5$**: Minimum distinct compositional cardinality for zero-shot generalization.
-
----
-
 
 $$\hat{f} = \arg\min_{f \in \mathcal{H}_{\Theta^\infty}} \frac{1}{N_{\text{songs}}} \sum_{i=1}^{N_{\text{songs}}} \left( y_i - f(x_i) \right)^2 + \lambda_{\text{reg}} \Vert{}f\Vert{}_{\mathcal{H}_{\Theta^\infty}}^2$$
 
