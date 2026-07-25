@@ -1,5 +1,4 @@
 infinite-width CALM Attention Network ⚠️
-- exact sample-complexity and error bounds
 
 ---
 
@@ -62,7 +61,6 @@ $$\Theta^\infty(x, x') = \sum_{j=1}^{\infty} \mu_j \phi_j(x) \phi_j(x')$$
 $$N_{\text{samples}} \ge \frac{\text{Tr}(\Theta^\infty)}{\lambda_{\text{reg}}} \cdot \ln\left(\frac{1}{\epsilon}\right) \approx \mathcal{O}\left(\kappa(\Theta^\infty) \cdot d_{\text{attn}}\right)$$
 
 
-*Dimensionality scaling for zero-shot generalization.*
 
 ---
 
