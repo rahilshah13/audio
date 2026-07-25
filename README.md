@@ -15,8 +15,6 @@ infinite-width CALM Attention Network ⚠️
 $$f(x; \theta) = W_{\text{up2}} \cdot \sigma(W_{\text{up1}} \cdot \text{LN}(h + \text{FF}(h)))$$
 
 
-*Feature mapping of the dual-stem generative architecture.*
-
 * **$x$**: Input $(B, T, C)$ audio sequence.
 * **$h$**: Hidden representation ($\text{Attention}(x) + x$).
 * **$\theta, W_{\text{up1/2}}$**: Parameters and dual-stem output weights.
