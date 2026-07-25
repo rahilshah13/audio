@@ -64,7 +64,7 @@ $$N_{\text{samples}} \ge \frac{\text{Tr}(\Theta^\infty)}{\lambda_{\text{reg}}} \
 
 ---
 
-### Config ($8$GB VRAM)
+### Config (8GB VRAM)
 
 * **$d_{\text{attn}}$**: $4096$ ($16$ heads, $d_{\text{head}} = 256$).
 * **$I_{\text{iter}}$**: $\approx 92 \cdot T_{\text{sec}}$.
