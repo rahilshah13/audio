@@ -6,7 +6,7 @@ import fcntl
 
 STATE_FILE = "data/global_state.json"
 
-def gpt_forward(params, x, scale, bpm, n_heads=16):
+def gpt_forward(params, x, scale, bpm, target_dim=88200, n_heads=16):
     # Initial projection
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
     B, T, C = x.shape
@@ -36,10 +36,11 @@ def gpt_forward(params, x, scale, bpm, n_heads=16):
     ff = jax.nn.gelu(h @ params['ff_1']) @ params['ff_2']
     h_norm = ((h + ff) - jnp.mean(h + ff, axis=-1, keepdims=True)) / jnp.sqrt(jnp.var(h + ff, axis=-1, keepdims=True) + 1e-5)
     
+    # Output dimension matches 2-channel flattened size per second (44100 * 2 = 88200)
     return jax.nn.gelu(h_norm @ params['up_proj_1']) @ params['up_proj_2']
 
-def init_params(key, dim=4096):
-    keys = jax.random.split(key, 12)
+def init_params(key, dim=4096, target_dim=88200):
+    keys = jax.random.split(key, 13)
     return {
         'down_proj_1': jax.random.normal(keys[0], (dim, 8192)),
         'down_proj_2': jax.random.normal(keys[1], (8192, dim)),
@@ -49,9 +50,10 @@ def init_params(key, dim=4096):
         'ff_1': jax.random.normal(keys[5], (dim, dim * 4)),
         'ff_2': jax.random.normal(keys[6], (dim * 4, dim)),
         'up_proj_1': jax.random.normal(keys[7], (dim, 8192)),
-        'up_proj_2': jax.random.normal(keys[8], (8192, 176400)),
-        'scale_emb': jax.random.normal(keys[9], (128, dim)),  # Assumes scale is categorical (0-127)
-        'bpm_proj': jax.random.normal(keys[10], (1, dim))     # Projects continuous float BPM
+        'up_proj_2': jax.random.normal(keys[8], (8192, target_dim)), 
+        'scale_emb': jax.random.normal(keys[9], (128, dim)),  
+        'bpm_proj': jax.random.normal(keys[10], (1, dim)),     
+        'stem_emb': jax.random.normal(keys[11], (2, dim))      # Discrete embedding for Instrumental (0) vs Vocal (1) stems
     }
 
 def read_global_state():
@@ -75,6 +77,17 @@ def register_global_window(window_str):
         data["processed_windows"].append(window_str)
         f.seek(0); f.truncate(); json.dump(data, f)
         fcntl.flock(f, fcntl.LOCK_UN)
+
+def quantize_and_merge_deltas(base_params, adapted_params, sparsity_threshold=0.01):
+    def q_merge(base_p, adapt_p):
+        delta = adapt_p - base_p
+        magnitude = jnp.abs(delta)
+        thresh = jnp.percentile(magnitude, 100.0 * (1.0 - sparsity_threshold))
+        sparse_delta = jnp.where(magnitude >= thresh, delta, 0.0)
+        quantized_delta = jnp.sign(sparse_delta) * jnp.round(jnp.abs(sparse_delta) * 10.0) / 10.0
+        return base_p + quantized_delta
+
+    return jax.tree_util.tree_map(q_merge, base_params, adapted_params)
 
 def push_and_pull_gradients(local_grads, accumulation_steps=1000):
     grad_store_path = "data/shared_gradients.pickle"
@@ -104,7 +117,10 @@ def push_and_pull_gradients(local_grads, accumulation_steps=1000):
             opt_state_path = "checkpoints/opt_state.pickle"
             opt_state = pickle.load(open(opt_state_path, "rb")) if os.path.exists(opt_state_path) else tx.init(params)
             updates, new_opt_state = tx.update(shared_grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
+            
+            new_params = optax.apply_updates(params, updates)
+            params = quantize_and_merge_deltas(params, new_params, sparsity_threshold=0.01)
+            
             pf.seek(0); pf.truncate(); pickle.dump(params, pf)
             pickle.dump(new_opt_state, open(opt_state_path, "wb"))
             fcntl.flock(pf, fcntl.LOCK_UN)
@@ -123,26 +139,34 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
         with open(meta_path, "r") as f: metadata = [json.loads(l) for l in f if l.strip()]
         if not metadata: time.sleep(2); continue
         
-        batch, batch_scales, batch_bpms = [], [], []
+        batch, batch_scales, batch_bpms, batch_stems = [], [], [], []
         
         while len(batch) < batch_size:
             entry = random.choice(metadata)
             shard_path = os.path.join("data", entry["shard"])
             if not os.path.exists(shard_path): continue
-            mmap_pool[entry["shard"]] = np.memmap(shard_path, dtype=np.float32, mode='r').reshape(-1, 4)
-            start_idx = int(random.uniform(0, (os.path.getsize(shard_path)//16 / entry["sample_rate"]) - seq_len) * entry["sample_rate"])
-            window_id = f"{entry['shard']}:{start_idx}"
+            # 2-channel audio layout (stride of 2 channels instead of 4)
+            mmap_pool[entry["shard"]] = np.memmap(shard_path, dtype=np.float32, mode='r').reshape(-1, 2)
+            bytes_per_frame = 8  # 2 channels * 4 bytes per float32
+            start_idx = int(random.uniform(0, (os.path.getsize(shard_path)//bytes_per_frame / entry["sample_rate"]) - seq_len) * entry["sample_rate"])
+            stem_type = int(entry.get("stem", 0)) # 0: Instrumental, 1: Vocal
+            window_id = f"{entry['shard']}:{start_idx}:stem_{stem_type}"
             
             if window_id in read_global_state()["processed_windows"]: continue 
             register_global_window(window_id)
             
-            latents = [mmap_pool[entry["shard"]][(entry["offset_bytes"]//16)+start_idx+(i*samples_per_sec):(entry["offset_bytes"]//16)+start_idx+(i+1)*samples_per_sec].flatten() for i in range(seq_len)]
+            offset_frames = entry["offset_bytes"] // bytes_per_frame
+            latents = [
+                mmap_pool[entry["shard"]][offset_frames + start_idx + (i * samples_per_sec) : offset_frames + start_idx + ((i + 1) * samples_per_sec)].flatten()
+                for i in range(seq_len)
+            ]
             
             batch.append(jnp.stack(latents))
             batch_scales.append(int(entry.get("scale", 0)))
             batch_bpms.append(float(entry.get("bpm", 120.0)))
+            batch_stems.append(stem_type)
             
-        yield jnp.stack(batch), jnp.array(batch_scales, dtype=jnp.int32), jnp.array(batch_bpms, dtype=jnp.float32)
+        yield jnp.stack(batch), jnp.array(batch_scales, dtype=jnp.int32), jnp.array(batch_bpms, dtype=jnp.float32), jnp.array(batch_stems, dtype=jnp.int32)
 
 if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
@@ -153,12 +177,25 @@ if __name__ == "__main__":
     
     loader = daemon_memmap_loader(batch_size=1)
     
-    @partial(jax.jit, static_argnames=['noise_scale', 'max_inner_steps', 'tol'])
-    def train_step_until_zero(params, batch, scales, bpms, key, noise_scale, max_inner_steps=1000, tol=1e-7):
-        noised = batch + jax.random.normal(jax.random.split(key)[0], batch.shape) * noise_scale
+    @partial(jax.jit, static_argnames=['noise_scale', 'max_inner_steps', 'tol', 'num_diffusion_steps'])
+    def train_step_until_zero(params, batch, scales, bpms, stems, key, noise_scale, max_inner_steps=1000, tol=1e-7, num_diffusion_steps=10):
+        k1, k2 = jax.random.split(key)
+        step_indices = jax.random.randint(k1, shape=(batch.shape[0],), minval=0, maxval=num_diffusion_steps)
+        
+        t = (step_indices.astype(jnp.float32) + 1.0) / float(num_diffusion_steps)
+        t = t[:, None, None]
+        alpha_t = jnp.cos(t * jnp.pi / 2.0)
+        sigma_t = jnp.sin(t * jnp.pi / 2.0)
+        
+        noise = jax.random.normal(k2, batch.shape)
+        noised = alpha_t * batch + sigma_t * noise * noise_scale
         
         def loss_fn(p):
-            return jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :], scales, bpms) - batch[:, 1:, :]))
+            # Inject stem conditioning alongside scale and BPM to respect instrumental vs vocal separation boundaries
+            stem_cond = p['stem_emb'][stems]  # [B, C]
+            # Temporarily incorporate stem conditioning into forward representation or conditioning path
+            pred_target = gpt_forward(p, noised[:, :-1, :], scales, bpms) + jnp.expand_dims(stem_cond, 1)
+            return jnp.mean(jnp.square(pred_target - batch[:, 1:, :]))
             
         def condition_fun(state):
             p, step_count, loss = state
@@ -167,7 +204,6 @@ if __name__ == "__main__":
         def body_fun(state):
             p, step_count, loss = state
             current_loss, grads = jax.value_and_grad(loss_fn)(p)
-            # Standard SGD internal update step for inner convergence loop
             p = jax.tree_util.tree_map(lambda param, g: param - 1e-4 * g, p, grads)
             return p, step_count + 1, current_loss
 
@@ -176,15 +212,14 @@ if __name__ == "__main__":
             condition_fun, body_fun, (params, 0, initial_loss)
         )
         
-        # Compute final gradients at the converged state for global accumulation
         _, final_grads = jax.value_and_grad(loss_fn)(final_params)
         return final_loss, final_grads
 
     step = 1
     while True:
         try:
-            b_data, b_scales, b_bpms = next(loader)
-            loss, grads = train_step_until_zero(params, b_data, b_scales, b_bpms, key, 0.05)
+            b_data, b_scales, b_bpms, b_stems = next(loader)
+            loss, grads = train_step_until_zero(params, b_data, b_scales, b_bpms, b_stems, key, 0.05)
             params, global_updated = push_and_pull_gradients(grads, accumulation_steps=100)
             if global_updated:
                 print(f"[Step {step}] Update. Converged Loss: {float(loss):.5f}")
