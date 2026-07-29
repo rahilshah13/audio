@@ -6,15 +6,17 @@ import fcntl
 
 STATE_FILE = "data/global_state.json"
 
-def gpt_forward(params, x, scale, bpm, target_dim=88200, n_heads=16):
+def gpt_forward(params, x, scale, bpm, stems, target_dim=88200, n_heads=16):
     # Initial projection
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
     B, T, C = x.shape
     
-    # Feature Conditioning: Embed scale and project BPM
+    # Feature Conditioning: Embed scale, project BPM, and embed stems
     s_emb = params['scale_emb'][scale]  # [B, C]
     b_emb = bpm[:, None] @ params['bpm_proj']  # [B, 1] @ [1, C] -> [B, C]
-    cond = jnp.expand_dims(s_emb + b_emb, 1)  # [B, 1, C]
+    st_emb = params['stem_emb'][stems]  # [B, C]
+    
+    cond = jnp.expand_dims(s_emb + b_emb + st_emb, 1)  # [B, 1, C]
     
     # Inject condition into the sequence
     x = x + cond 
@@ -191,10 +193,8 @@ if __name__ == "__main__":
         noised = alpha_t * batch + sigma_t * noise * noise_scale
         
         def loss_fn(p):
-            # Inject stem conditioning alongside scale and BPM to respect instrumental vs vocal separation boundaries
-            stem_cond = p['stem_emb'][stems]  # [B, C]
-            # Temporarily incorporate stem conditioning into forward representation or conditioning path
-            pred_target = gpt_forward(p, noised[:, :-1, :], scales, bpms) + jnp.expand_dims(stem_cond, 1)
+            # Pass stems directly into gpt_forward to handle conditional broadcasting properly
+            pred_target = gpt_forward(p, noised[:, :-1, :], scales, bpms, stems)
             return jnp.mean(jnp.square(pred_target - batch[:, 1:, :]))
             
         def condition_fun(state):
