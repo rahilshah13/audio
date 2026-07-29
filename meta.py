@@ -16,7 +16,8 @@ class SpectralPreconditionerMLP(nn.Module):
         # Input: 1024 (NTK) + 1 (Drift Scalar)
         x = nn.gelu(nn.Dense(512)(x))
         x = nn.gelu(nn.Dense(512)(x))
-        return jax.nn.sigmoid(nn.Dense(x.shape[-1])(x)) * 2.0 
+        # Fixed dimension bug: replaced x.shape[-1] with 1025 to match input/feature dimensionality
+        return jax.nn.sigmoid(nn.Dense(1025)(x)) * 2.0 
 
 class MetaDashboard:
     def __init__(self):
@@ -53,7 +54,12 @@ def get_meta_preconditioner(grads):
     scales = model.apply(meta_params, ntk_data)
     
     flat_grads, treedef = ravel_pytree(grads)
-    scaled_flat = flat_grads * jax.image.resize(scales, (flat_grads.shape[0],), 'linear')
+    
+    # Robust handling for dynamic gradient shapes when scaling parameters across different architectural layers
+    if scales.shape[0] != flat_grads.shape[0]:
+        scales = jax.image.resize(scales, (flat_grads.shape[0],), 'linear')
+        
+    scaled_flat = flat_grads * scales
     return treedef(scaled_flat)
 
 @jax.jit
