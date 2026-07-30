@@ -7,18 +7,14 @@ import fcntl
 STATE_FILE = "data/global_state.json"
 
 def gpt_forward(params, x, scale, bpm, stems, target_dim=88200, n_heads=16):
-    # Initial projection
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
     B, T, C = x.shape
     
-    # Feature Conditioning: Embed scale, project BPM, and embed stems
-    s_emb = params['scale_emb'][scale]  # [B, C]
-    b_emb = bpm[:, None] @ params['bpm_proj']  # [B, 1] @ [1, C] -> [B, C]
-    st_emb = params['stem_emb'][stems]  # [B, C]
+    s_emb = params['scale_emb'][scale]
+    b_emb = bpm[:, None] @ params['bpm_proj']
+    st_emb = params['stem_emb'][stems]
     
-    cond = jnp.expand_dims(s_emb + b_emb + st_emb, 1)  # [B, 1, C]
-    
-    # Inject condition into the sequence
+    cond = jnp.expand_dims(s_emb + b_emb + st_emb, 1)
     x = x + cond 
     
     head_dim = C // n_heads
@@ -38,7 +34,6 @@ def gpt_forward(params, x, scale, bpm, stems, target_dim=88200, n_heads=16):
     ff = jax.nn.gelu(h @ params['ff_1']) @ params['ff_2']
     h_norm = ((h + ff) - jnp.mean(h + ff, axis=-1, keepdims=True)) / jnp.sqrt(jnp.var(h + ff, axis=-1, keepdims=True) + 1e-5)
     
-    # Output dimension matches 2-channel flattened size per second (44100 * 2 = 88200)
     return jax.nn.gelu(h_norm @ params['up_proj_1']) @ params['up_proj_2']
 
 def init_params(key, dim=4096, target_dim=88200):
@@ -54,8 +49,8 @@ def init_params(key, dim=4096, target_dim=88200):
         'up_proj_1': jax.random.normal(keys[7], (dim, 8192)),
         'up_proj_2': jax.random.normal(keys[8], (8192, target_dim)), 
         'scale_emb': jax.random.normal(keys[9], (128, dim)),  
-        'bpm_proj': jax.random.normal(keys[10], (1, dim)),     
-        'stem_emb': jax.random.normal(keys[11], (2, dim))      # Discrete embedding for Instrumental (0) vs Vocal (1) stems
+        'bpm_proj': jax.random.normal(keys[10], (1, dim)),    
+        'stem_emb': jax.random.normal(keys[11], (2, dim))
     }
 
 def read_global_state():
@@ -91,9 +86,49 @@ def quantize_and_merge_deltas(base_params, adapted_params, sparsity_threshold=0.
 
     return jax.tree_util.tree_map(q_merge, base_params, adapted_params)
 
-def push_and_pull_gradients(local_grads, accumulation_steps=1000):
+# Xi-Lin Li style Lie group perturbation matching:
+def lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder, perturbation_scale=1e-4):
+    """
+    1. Generates infinitesimal parameter perturbation vector dx.
+    2. Evaluates gradient perturbation dg via directional derivative / Jvp.
+    3. Projects preconditioner updates onto a positive-definite Lie group manifold.
+    """
+    flat_grads, treedef = jax.flatten_util.ravel_pytree(shared_grads)
+    flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
+    
+    # Infinitesimal parameter perturbation dx along the manifold
+    key = jax.random.PRNGKey(int(time.time() * 1000) % 2**31)
+    dx = perturbation_scale * jax.random.normal(key, flat_params.shape)
+    
+    def grad_mapping(p_flat):
+        p_tree = unflatten_fn(p_flat)
+        _, g_tree = jax.value_and_grad(loss_fn_builder(p_tree))(p_tree)
+        g_flat, _ = jax.flatten_util.ravel_pytree(g_tree)
+        return g_flat
+
+    _, dg = jax.jvp(grad_mapping, (flat_params,), (dx,))
+    
+    # Secant equation alignment: curvature approximation matching dx and dg
+    # arbitrary bounds [1.0, 2.0]
+    denom = jnp.dot(dx, dg) + 1e-8
+    curvature_scalar = jnp.abs(jnp.dot(dx, flat_grads) / denom)
+    clamped_scalar = jnp.clip(curvature_scalar, 1.0, 2.0)
+    
+    meta_precond = get_meta_preconditioner(shared_grads)
+    if meta_precond is not None:
+        flat_precond, _ = jax.flatten_util.ravel_pytree(meta_precond)
+        lie_manifold_factors = jnp.clip(flat_precond * clamped_scalar, 1.0, 2.0)
+    else:
+        lie_manifold_factors = jnp.full_like(flat_grads, clamped_scalar)
+
+    preconditioned_flat = flat_grads * lie_manifold_factors
+    return treedef(preconditioned_flat)
+
+def push_and_pull_gradients(local_grads, current_params, loss_fn_builder, accumulation_steps=100):
     grad_store_path = "data/shared_gradients.pickle"
     params_store_path = "checkpoints/checkpoint_run.pickle"
+    prev_params_store_path = "checkpoints/checkpoint_prev.pickle"
+    
     with open(grad_store_path, "a+b" if os.path.exists(grad_store_path) else "w+b") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
@@ -108,13 +143,18 @@ def push_and_pull_gradients(local_grads, accumulation_steps=1000):
             shared_data = {"accumulated_grads": None, "count": 0} 
         f.seek(0); f.truncate(); pickle.dump(shared_data, f)
         fcntl.flock(f, fcntl.LOCK_UN)
+        
     if apply_global_update:
         with open(params_store_path, "r+b") as pf:
             fcntl.flock(pf, fcntl.LOCK_EX)
             params = pickle.load(pf)
-            preconditioner = get_meta_preconditioner(shared_grads)
-            if preconditioner:
-                shared_grads = jax.tree_util.tree_map(lambda g, p: g * p, shared_grads, preconditioner)
+            
+            if os.path.exists(params_store_path):
+                with open(prev_params_store_path, "wb") as ppf:
+                    pickle.dump(params, ppf)
+            
+            shared_grads = lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder)
+                
             tx = optax.adam(2e-4)
             opt_state_path = "checkpoints/opt_state.pickle"
             opt_state = pickle.load(open(opt_state_path, "rb")) if os.path.exists(opt_state_path) else tx.init(params)
@@ -127,6 +167,7 @@ def push_and_pull_gradients(local_grads, accumulation_steps=1000):
             pickle.dump(new_opt_state, open(opt_state_path, "wb"))
             fcntl.flock(pf, fcntl.LOCK_UN)
             return params, True
+            
     with open(params_store_path, "rb") as pf:
         fcntl.flock(pf, fcntl.LOCK_SH)
         params = pickle.load(pf)
@@ -147,11 +188,10 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
             entry = random.choice(metadata)
             shard_path = os.path.join("data", entry["shard"])
             if not os.path.exists(shard_path): continue
-            # 2-channel audio layout (stride of 2 channels instead of 4)
             mmap_pool[entry["shard"]] = np.memmap(shard_path, dtype=np.float32, mode='r').reshape(-1, 2)
-            bytes_per_frame = 8  # 2 channels * 4 bytes per float32
+            bytes_per_frame = 8  
             start_idx = int(random.uniform(0, (os.path.getsize(shard_path)//bytes_per_frame / entry["sample_rate"]) - seq_len) * entry["sample_rate"])
-            stem_type = int(entry.get("stem", 0)) # 0: Instrumental, 1: Vocal
+            stem_type = int(entry.get("stem", 0)) 
             window_id = f"{entry['shard']}:{start_idx}:stem_{stem_type}"
             
             if window_id in read_global_state()["processed_windows"]: continue 
@@ -193,7 +233,6 @@ if __name__ == "__main__":
         noised = alpha_t * batch + sigma_t * noise * noise_scale
         
         def loss_fn(p):
-            # Pass stems directly into gpt_forward to handle conditional broadcasting properly
             pred_target = gpt_forward(p, noised[:, :-1, :], scales, bpms, stems)
             return jnp.mean(jnp.square(pred_target - batch[:, 1:, :]))
             
@@ -220,7 +259,11 @@ if __name__ == "__main__":
         try:
             b_data, b_scales, b_bpms, b_stems = next(loader)
             loss, grads = train_step_until_zero(params, b_data, b_scales, b_bpms, b_stems, key, 0.05)
-            params, global_updated = push_and_pull_gradients(grads, accumulation_steps=100)
+            
+            # Curried loss function builder to pass into the Lie group perturbation engine
+            loss_fn_builder = lambda p: lambda current_p: jnp.mean(jnp.square(gpt_forward(current_p, b_data[:, :-1, :], b_scales, b_bpms, b_stems) - b_data[:, 1:, :]))
+            
+            params, global_updated = push_and_pull_gradients(grads, params, loss_fn_builder, accumulation_steps=100)
             if global_updated:
                 print(f"[Step {step}] Update. Converged Loss: {float(loss):.5f}")
                 step += 1
