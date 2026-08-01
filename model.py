@@ -1,4 +1,4 @@
-import os, json, pickle, jax, optax, random, time, numpy as np
+import os, json, pickle, sys, jax, optax, random, time, numpy as np
 import jax.numpy as jnp
 from functools import partial
 from meta import get_meta_preconditioner
@@ -6,6 +6,7 @@ import fcntl
 
 STATE_FILE = "data/global_state.json"
 
+@jax.jit
 def gpt_forward(params, x, scale, bpm, stems, target_dim=88200, n_heads=16):
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
     B, T, C = x.shape
@@ -75,6 +76,7 @@ def register_global_window(window_str):
         f.seek(0); f.truncate(); json.dump(data, f)
         fcntl.flock(f, fcntl.LOCK_UN)
 
+@jax.jit
 def quantize_and_merge_deltas(base_params, adapted_params, sparsity_threshold=0.01):
     def q_merge(base_p, adapt_p):
         delta = adapt_p - base_p
@@ -86,20 +88,16 @@ def quantize_and_merge_deltas(base_params, adapted_params, sparsity_threshold=0.
 
     return jax.tree_util.tree_map(q_merge, base_params, adapted_params)
 
-# Xi-Lin Li style Lie group perturbation matching:
-def lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder, perturbation_scale=1e-4):
-    """
-    1. Generates infinitesimal parameter perturbation vector dx.
-    2. Evaluates gradient perturbation dg via directional derivative / Jvp.
-    3. Projects preconditioner updates onto a positive-definite Lie group manifold.
-    """
+def lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder, perturbation_scale=1e-4, key=None):
+    if key is None:
+        key = jax.random.PRNGKey(0)
+    
     flat_grads, treedef = jax.flatten_util.ravel_pytree(shared_grads)
     flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
     
-    # Infinitesimal parameter perturbation dx along the manifold
-    key = jax.random.PRNGKey(int(time.time() * 1000) % 2**31)
     dx = perturbation_scale * jax.random.normal(key, flat_params.shape)
     
+    @jax.jit
     def grad_mapping(p_flat):
         p_tree = unflatten_fn(p_flat)
         _, g_tree = jax.value_and_grad(loss_fn_builder(p_tree))(p_tree)
@@ -108,8 +106,6 @@ def lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder
 
     _, dg = jax.jvp(grad_mapping, (flat_params,), (dx,))
     
-    # Secant equation alignment: curvature approximation matching dx and dg
-    # arbitrary bounds [1.0, 2.0]
     denom = jnp.dot(dx, dg) + 1e-8
     curvature_scalar = jnp.abs(jnp.dot(dx, flat_grads) / denom)
     clamped_scalar = jnp.clip(curvature_scalar, 1.0, 2.0)
@@ -124,7 +120,7 @@ def lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder
     preconditioned_flat = flat_grads * lie_manifold_factors
     return treedef(preconditioned_flat)
 
-def push_and_pull_gradients(local_grads, current_params, loss_fn_builder, accumulation_steps=100):
+def push_and_pull_gradients(local_grads, current_params, loss_fn_builder, accumulation_steps=100, lie_key=None):
     grad_store_path = "data/shared_gradients.pickle"
     params_store_path = "checkpoints/checkpoint_run.pickle"
     prev_params_store_path = "checkpoints/checkpoint_prev.pickle"
@@ -153,7 +149,7 @@ def push_and_pull_gradients(local_grads, current_params, loss_fn_builder, accumu
                 with open(prev_params_store_path, "wb") as ppf:
                     pickle.dump(params, ppf)
             
-            shared_grads = lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder)
+            shared_grads = lie_group_perturbation_matching_update(params, shared_grads, loss_fn_builder, key=lie_key)
                 
             tx = optax.adam(2e-4)
             opt_state_path = "checkpoints/opt_state.pickle"
@@ -219,9 +215,9 @@ if __name__ == "__main__":
     
     loader = daemon_memmap_loader(batch_size=1)
     
-    @partial(jax.jit, static_argnames=['noise_scale', 'max_inner_steps', 'tol', 'num_diffusion_steps'])
-    def train_step_until_zero(params, batch, scales, bpms, stems, key, noise_scale, max_inner_steps=1000, tol=1e-7, num_diffusion_steps=10):
-        k1, k2 = jax.random.split(key)
+    @partial(jax.jit, static_argnames=['noise_scale', 'num_diffusion_steps'])
+    def train_step_until_zero(params, batch, scales, bpms, stems, key, noise_scale, num_diffusion_steps=10):
+        k1, k2, k_loop = jax.random.split(key, 3)
         step_indices = jax.random.randint(k1, shape=(batch.shape[0],), minval=0, maxval=num_diffusion_steps)
         
         t = (step_indices.astype(jnp.float32) + 1.0) / float(num_diffusion_steps)
@@ -232,40 +228,48 @@ if __name__ == "__main__":
         noise = jax.random.normal(k2, batch.shape)
         noised = alpha_t * batch + sigma_t * noise * noise_scale
         
-        def loss_fn(p):
-            pred_target = gpt_forward(p, noised[:, :-1, :], scales, bpms, stems)
-            return jnp.mean(jnp.square(pred_target - batch[:, 1:, :]))
-            
-        def condition_fun(state):
-            p, step_count, loss = state
-            return (step_count < max_inner_steps) & (loss > tol)
-
-        def body_fun(state):
-            p, step_count, loss = state
-            current_loss, grads = jax.value_and_grad(loss_fn)(p)
-            p = jax.tree_util.tree_map(lambda param, g: param - 1e-4 * g, p, grads)
-            return p, step_count + 1, current_loss
-
-        initial_loss, _ = jax.value_and_grad(loss_fn)(params)
-        final_params, final_steps, final_loss = jax.lax.while_loop(
-            condition_fun, body_fun, (params, 0, initial_loss)
-        )
+        noised_input = noised[:, :-1, :]
+        target_output = batch[:, 1:, :]
         
-        _, final_grads = jax.value_and_grad(loss_fn)(final_params)
-        return final_loss, final_grads
+        def loss_fn(p):
+            pred_target = gpt_forward(p, noised_input, scales, bpms, stems)
+            return jnp.mean(jnp.square(pred_target - target_output))
+
+        def scan_body_fn(p, _):
+            current_loss, grads = jax.value_and_grad(loss_fn)(p)
+            next_p = jax.tree_util.tree_map(lambda param, g: param - 1e-4 * g, p, grads)
+            return next_p, current_loss
+
+        final_params, loss_history = jax.lax.scan(scan_body_fn, params, xs=None, length=50)
+        
+        final_loss, final_grads = jax.value_and_grad(loss_fn)(final_params)
+        return final_loss, final_grads, k_loop
+
+    sample_batch, sample_scales, sample_bpms, sample_stems = next(loader)
+    _, sample_subk = jax.random.split(key)
+    jaxpr_repr = jax.make_jaxpr(train_step_until_zero)(
+        params, sample_batch, sample_scales, sample_bpms, sample_stems, sample_subk, 0.05
+    )
+    with open("checkpoints/train_step.jaxpr", "wb") as jpr_file:
+        pickle.dump(jaxpr_repr, jpr_file)
+
+    if "--export-jaxpr" in sys.argv:
+        print("JAXPR exported to checkpoints/train_step.jaxpr. Exiting.")
+        sys.exit(0)
 
     step = 1
     while True:
         try:
             b_data, b_scales, b_bpms, b_stems = next(loader)
-            loss, grads = train_step_until_zero(params, b_data, b_scales, b_bpms, b_stems, key, 0.05)
+            key, subkey = jax.random.split(key)
+            loss, grads, key = train_step_until_zero(params, b_data, b_scales, b_bpms, b_stems, subkey, 0.05)
             
-            # Curried loss function builder to pass into the Lie group perturbation engine
-            loss_fn_builder = lambda p: lambda current_p: jnp.mean(jnp.square(gpt_forward(current_p, b_data[:, :-1, :], b_scales, b_bpms, b_stems) - b_data[:, 1:, :]))
+            loss_fn_builder = lambda current_p, bd=b_data, bs=b_scales, bp=b_bpms, st=b_stems: lambda p: jnp.mean(jnp.square(gpt_forward(p, bd[:, :-1, :], bs, bp, st) - bd[:, 1:, :]))
             
-            params, global_updated = push_and_pull_gradients(grads, params, loss_fn_builder, accumulation_steps=100)
+            key, lie_subkey = jax.random.split(key)
+            params, global_updated = push_and_pull_gradients(grads, params, loss_fn_builder, accumulation_steps=100, lie_key=lie_subkey)
             if global_updated:
-                print(f"[Step {step}] Update. Converged Loss: {float(loss):.5f}")
+                print(f"[Step {step}] Update. Final Scan Loss: {float(loss):.5f}")
                 step += 1
         except Exception as e: 
             print(e)
