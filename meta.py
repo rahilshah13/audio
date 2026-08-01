@@ -13,10 +13,8 @@ def align_drift(w_new, w_old):
 class SpectralPreconditionerMLP(nn.Module):
     @nn.compact
     def __call__(self, x):
-        # Input: 1024 (NTK) + 1 (Drift Scalar)
         x = nn.gelu(nn.Dense(512)(x))
         x = nn.gelu(nn.Dense(512)(x))
-        # Fixed dimension bug: replaced x.shape[-1] with 1025 to match input/feature dimensionality
         return jax.nn.sigmoid(nn.Dense(1025)(x)) * 2.0 
 
 class MetaDashboard:
@@ -39,7 +37,6 @@ def get_meta_preconditioner(grads):
     ntk_files = sorted(glob.glob("ntk_logs/ntk_step_*.npy"))
     if not ntk_files: return None
     
-    # Calculate drift via previous checkpoint
     curr_ckpt = "checkpoints/checkpoint_run.pickle"
     prev_ckpt = "checkpoints/checkpoint_prev.pickle"
     drift = 0.0
@@ -55,7 +52,6 @@ def get_meta_preconditioner(grads):
     
     flat_grads, treedef = ravel_pytree(grads)
     
-    # Robust handling for dynamic gradient shapes when scaling parameters across different architectural layers
     if scales.shape[0] != flat_grads.shape[0]:
         scales = jax.image.resize(scales, (flat_grads.shape[0],), 'linear')
         
@@ -68,10 +64,16 @@ def train_step(state, inputs):
         pred_scales = SpectralPreconditionerMLP().apply(params, inputs)
         return jnp.mean(jnp.square(pred_scales - jnp.ones_like(pred_scales)))
     
-    loss, grads = jax.value_and_grad(loss_fn)(state['params'])
-    updates, new_opt_state = state['tx'].update(grads, state['opt_state'])
-    return loss, {'params': optax.apply_updates(state['params'], updates), 
-                  'opt_state': new_opt_state, 'tx': state['tx']}
+    def scan_body(carry, x):
+        st, _ = carry
+        loss, grads = jax.value_and_grad(loss_fn)(st['params'])
+        updates, new_opt_state = st['tx'].update(grads, st['opt_state'])
+        new_params = optax.apply_updates(st['params'], updates)
+        new_st = {'params': new_params, 'opt_state': new_opt_state, 'tx': st['tx']}
+        return (new_st, loss), loss
+
+    (state, final_loss), _ = jax.lax.scan(scan_body, (state, 0.0), xs=None, length=1)
+    return final_loss, state
 
 def run_meta_daemon():
     print("[META-DAEMON] Initializing Manifold-Aware Preconditioner...")
