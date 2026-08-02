@@ -27,9 +27,9 @@ $$f(x; \theta) = W_{\text{up2}} \cdot \sigma(W_{\text{up1}} \cdot \text{LN}(h + 
 
 ---
 
-### Unified Control Flow & Hybrid Optimization Dynamics (`model.py` + `meta.py`)
+### `model.py` + `meta.py`
 
-The global training iteration interleaves inner gradient alignment loops with outer meta-preconditioned updates and manifold-aware parameter projections:
+The global training regime interleaves inner gradient alignment loops with outer meta-preconditioned updates and manifold-aware parameter projections:
 
 $$\text{Inner Loop (While-Loop Convergence)}: \quad \theta^{(k+1)} = \theta^{(k)} - \eta \cdot \nabla_\theta \mathcal{L}_{\text{diff}}(\theta^{(k)})$$
 
