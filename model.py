@@ -85,7 +85,8 @@ def quantize_and_merge_deltas(base_params, adapted_params, key, sparsity_thresho
     subkeys = jax.random.split(key, len(jax.tree_util.tree_leaves(base_params)))
     return jax.tree_util.tree_map(q_merge, base_params, adapted_params, jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(base_params), subkeys))
 
-def lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems, perturbation_scale=1e-4, key=None):
+def lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems,
+                                            perturbation_scale=1e-4, key=None, loss=None):
     key = key if key is not None else jax.random.PRNGKey(0)
     flat_grads, _ = jax.flatten_util.ravel_pytree(shared_grads)
     flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
@@ -101,11 +102,14 @@ def lie_group_perturbation_matching_update(params, shared_grads, noised_input, t
     curvatures = [jnp.abs(jnp.dot(dx, flat_grads) / (jnp.dot(dx, jax.jvp(lambda p: grad_mapping(p, dx), (flat_params,), (dx,))[1]) + 1e-8)) for dx in dxs]
     clamped = jnp.clip(jnp.mean(jnp.array(curvatures)), 1.0, 2.0)
     
-    meta_precond = get_meta_preconditioner(shared_grads)
+    # loss is passed through so the meta module can use it as a supervised
+    # target / outcome signal instead of only seeing NTK statistics + drift.
+    meta_precond = get_meta_preconditioner(shared_grads, loss=loss)
     factors = jnp.clip(jax.flatten_util.ravel_pytree(meta_precond)[0] * clamped, 1.0, 2.0) if meta_precond is not None else jnp.full_like(flat_grads, clamped)
     return unflatten_fn(flat_grads * factors)
 
-def push_and_pull_gradients(local_grads, current_params, noised_input, target_output, scales, bpms, stems, accumulation_steps=100, lie_key=None, quant_key=None):
+def push_and_pull_gradients(local_grads, current_params, noised_input, target_output, scales, bpms, stems, loss,
+                             accumulation_steps=100, lie_key=None, quant_key=None):
     grad_store = "data/shared_gradients.pickle"
     ckpt_dir = "checkpoints"
     ckpt_path, prev_ckpt_path = os.path.join(ckpt_dir, "checkpoint_bundle.pickle"), os.path.join(ckpt_dir, "checkpoint_bundle_prev.pickle")
@@ -114,15 +118,17 @@ def push_and_pull_gradients(local_grads, current_params, noised_input, target_ou
     with exclusive_lock(UPDATE_LOCK_FILE):
         try:
             with open(grad_store, "rb") as f: shared_data = pickle.load(f)
-        except Exception: shared_data = {"accumulated_grads": None, "count": 0}
+        except Exception: shared_data = {"accumulated_grads": None, "accumulated_loss": None, "count": 0}
 
         shared_data["accumulated_grads"] = local_grads if shared_data["accumulated_grads"] is None else jax.tree_util.tree_map(lambda x, y: x + y, shared_data["accumulated_grads"], local_grads)
+        shared_data["accumulated_loss"] = float(loss) if shared_data.get("accumulated_loss") is None else shared_data["accumulated_loss"] + float(loss)
         shared_data["count"] += 1
         apply_update = shared_data["count"] >= accumulation_steps
 
         if apply_update:
             shared_grads = jax.tree_util.tree_map(lambda x: x / shared_data["count"], shared_data["accumulated_grads"])
-            shared_data = {"accumulated_grads": None, "count": 0}
+            avg_loss = shared_data["accumulated_loss"] / shared_data["count"]
+            shared_data = {"accumulated_grads": None, "accumulated_loss": None, "count": 0}
         
         atomic_pickle_dump(shared_data, grad_store)
 
@@ -140,7 +146,7 @@ def push_and_pull_gradients(local_grads, current_params, noised_input, target_ou
 
         if os.path.exists(ckpt_path): atomic_pickle_dump({"params": params, "opt_state": opt_state}, prev_ckpt_path)
 
-        shared_grads = lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems, key=lie_key)
+        shared_grads = lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems, key=lie_key, loss=avg_loss)
         tx = optax.adamw(2e-4)
         updates, new_opt_state = tx.update(shared_grads, opt_state, params)
         params = quantize_and_merge_deltas(params, optax.apply_updates(params, updates), quant_key, sparsity_threshold=0.01)
@@ -222,7 +228,8 @@ if __name__ == "__main__":
             loss, grads, key, noised_input, target_output = train_step_optimized(params, b_data, b_scales, b_bpms, b_stems, subkey, 0.05)
             
             key, lie_subkey, quant_subkey = jax.random.split(key, 3)
-            params, global_updated = push_and_pull_gradients(grads, params, noised_input, target_output, b_scales, b_bpms, b_stems, accumulation_steps=100, lie_key=lie_subkey, quant_key=quant_subkey)
+            params, global_updated = push_and_pull_gradients(grads, params, noised_input, target_output, b_scales, b_bpms, b_stems, loss,
+                                                              accumulation_steps=100, lie_key=lie_subkey, quant_key=quant_subkey)
             if global_updated:
                 print(f"[Step {step}] Global Update Applied. Loss: {float(loss):.5f}")
                 step += 1
