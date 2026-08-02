@@ -1,156 +1,179 @@
-import os, json, pickle, sys, jax, optax, random, time, numpy as np, contextlib
+import os, json, pickle, jax, optax, random, time, sys, numpy as np
 import jax.numpy as jnp
-from jax.flatten_util import ravel_pytree
 from functools import partial
 from meta import get_meta_preconditioner
-import fcntl
+import fcntl 
 
 STATE_FILE = "data/global_state.json"
-MAX_PROCESSED_WINDOWS = 50000
-WINDOW_LOCK_FILE = "data/global_state.lock"
-UPDATE_LOCK_FILE = "data/update.lock"
+CURR_CKPT = "checkpoints/checkpoint_bundle.pickle"
+PREV_CKPT = "checkpoints/checkpoint_bundle_prev.pickle"
 
-def rsqrt(x):
-    return 1.0 / jnp.sqrt(x)
-
-@jax.jit
-def gpt_forward(params, x, scale, bpm, stems, latent_dim=1024, n_heads=16):
+def gpt_forward(params, x, scale, bpm, target_dim=88200, n_heads=16):
     x = jax.nn.gelu(x @ params['down_proj_1']) @ params['down_proj_2']
     B, T, C = x.shape
-    cond = jnp.expand_dims(params['scale_emb'][scale] + bpm[:, None] @ params['bpm_proj'] + params['stem_emb'][stems], 1)
-    x = x + cond
+    
+    s_emb = params['scale_emb'][scale]
+    b_emb = bpm[:, None] @ params['bpm_proj']
+    cond = jnp.expand_dims(s_emb + b_emb, 1)
+    
+    x = x + cond 
     head_dim = C // n_heads
-    q, k, v = [(x @ params[k_name]).reshape(B, T, n_heads, head_dim).swapaxes(1, 2) for k_name in ('query', 'key', 'value')]
-    scores = jnp.where(jnp.tril(jnp.ones((T, T), dtype=bool))[None, None, :, :], (q @ k.swapaxes(-2, -1)) / jnp.sqrt(head_dim), -1e9)
-    h = (jax.nn.softmax(scores, axis=-1) @ v).swapaxes(1, 2).reshape(B, T, C) + x
-    h = (h - h.mean(-1, keepdims=True)) * rsqrt(h.var(-1, keepdims=True) + 1e-5) * params['ln1_scale'] + params['ln1_bias']
-    h_norm = (h + jax.nn.gelu(h @ params['ff_1']) @ params['ff_2'])
-    h_norm = (h_norm - h_norm.mean(-1, keepdims=True)) * rsqrt(h_norm.var(-1, keepdims=True) + 1e-5) * params['ln2_scale'] + params['ln2_bias']
+    
+    q = (x @ params['query']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
+    k = (x @ params['key']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
+    v = (x @ params['value']).reshape(B, T, n_heads, head_dim).swapaxes(1, 2)
+    
+    scores = (q @ k.swapaxes(-2, -1)) / jnp.sqrt(head_dim)
+    mask = jnp.tril(jnp.ones((T, T), dtype=bool))[None, None, :, :]
+    scores = jnp.where(mask, scores, -1e9)
+    attn = jax.nn.softmax(scores, axis=-1) @ v
+    
+    h = attn.swapaxes(1, 2).reshape(B, T, C)
+    h = ((h + x) - jnp.mean(h + x, axis=-1, keepdims=True)) / jnp.sqrt(jnp.var(h + x, axis=-1, keepdims=True) + 1e-5)
+    
+    ff = jax.nn.gelu(h @ params['ff_1']) @ params['ff_2']
+    h_norm = ((h + ff) - jnp.mean(h + ff, axis=-1, keepdims=True)) / jnp.sqrt(jnp.var(h + ff, axis=-1, keepdims=True) + 1e-5)
+    
     return jax.nn.gelu(h_norm @ params['up_proj_1']) @ params['up_proj_2']
 
-def init_params(key, dim=1024, latent_dim=1024):
-    keys = jax.random.split(key, 16)
-    specs = [('down_proj_1', (dim, 2048)), ('down_proj_2', (2048, dim)), ('query', (dim, dim)),
-             ('key', (dim, dim)), ('value', (dim, dim)), ('ff_1', (dim, dim * 4)),
-             ('ff_2', (dim * 4, dim)), ('up_proj_1', (dim, 2048)), ('up_proj_2', (2048, latent_dim)),
-             ('scale_emb', (128, dim)), ('bpm_proj', (1, dim)), ('stem_emb', (2, dim))]
-    p = {k: jax.random.normal(keys[i], shape) * 0.02 for i, (k, shape) in enumerate(specs)}
-    p.update({'ln1_scale': jnp.ones((dim,)), 'ln1_bias': jnp.zeros((dim,)),
-              'ln2_scale': jnp.ones((dim,)), 'ln2_bias': jnp.zeros((dim,))})
-    return p
+def init_params(key, dim=4096, target_dim=88200):
+    keys = jax.random.split(key, 13)
+    return {
+        'down_proj_1': jax.random.normal(keys[0], (dim, 8192)),
+        'down_proj_2': jax.random.normal(keys[1], (8192, dim)),
+        'query': jax.random.normal(keys[2], (dim, dim)),
+        'key': jax.random.normal(keys[3], (dim, dim)),
+        'value': jax.random.normal(keys[4], (dim, dim)),
+        'ff_1': jax.random.normal(keys[5], (dim, dim * 4)),
+        'ff_2': jax.random.normal(keys[6], (dim * 4, dim)),
+        'up_proj_1': jax.random.normal(keys[7], (dim, 8192)),
+        'up_proj_2': jax.random.normal(keys[8], (8192, target_dim)), 
+        'scale_emb': jax.random.normal(keys[9], (128, dim)),  
+        'bpm_proj': jax.random.normal(keys[10], (1, dim)),     
+        'stem_emb': jax.random.normal(keys[11], (2, dim))
+    }
 
-@contextlib.contextmanager
-def exclusive_lock(path):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a+b") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try: yield f
-        finally: fcntl.flock(f, fcntl.LOCK_UN)
+def lie_group_perturbation(w, generator_perturbation, eps=1e-3):
+    skew_w = 0.5 * (generator_perturbation - jnp.swapaxes(generator_perturbation, -1, -2))
+    w_perturbed = w @ jax.scipy.linalg.exptm(eps * skew_w)
+    return w_perturbed
 
-def atomic_json_dump(obj, path):
-    tmp = path + f".tmp.{os.getpid()}"
-    with open(tmp, "w") as f: json.dump(obj, f)
-    os.replace(tmp, path)
-
-def atomic_pickle_dump(obj, path):
-    tmp = path + f".tmp.{os.getpid()}"
-    with open(tmp, "wb") as f: pickle.dump(obj, f)
-    os.replace(tmp, path)
+def read_global_state():
+    os.makedirs("data", exist_ok=True)
+    if not os.path.exists(STATE_FILE): return {"processed_windows": []} 
+    try:
+        with open(STATE_FILE, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            data = json.load(f)
+            fcntl.flock(f, fcntl.LOCK_UN)
+            return data
+    except Exception: return {"processed_windows": []}
 
 def register_global_window(window_str):
-    os.makedirs("data", exist_ok=True)
-    with exclusive_lock(WINDOW_LOCK_FILE):
+    with open(STATE_FILE, "r+" if os.path.exists(STATE_FILE) else "w+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         try:
-            with open(STATE_FILE, "r") as f: data = json.load(f)
+            f.seek(0)
+            data = json.load(f)
         except Exception: data = {"processed_windows": []}
-        windows = data.get("processed_windows", [])
-        if window_str in windows: return False
-        windows.append(window_str)
-        if len(windows) > MAX_PROCESSED_WINDOWS: windows = windows[-MAX_PROCESSED_WINDOWS:]
-        data["processed_windows"] = windows
-        atomic_json_dump(data, STATE_FILE)
-        return True
+        data["processed_windows"].append(window_str)
+        f.seek(0); f.truncate(); json.dump(data, f)
+        fcntl.flock(f, fcntl.LOCK_UN)
 
-@jax.jit
-def quantize_and_merge_deltas(base_params, adapted_params, key, sparsity_threshold=0.01):
-    def q_merge(base_p, adapt_p, subkey):
+def quantize_and_merge_deltas(base_params, adapted_params, sparsity_threshold=0.01):
+    def q_merge(base_p, adapt_p):
         delta = adapt_p - base_p
-        mag = jnp.abs(delta)
-        flat_mag = mag.reshape(-1)
-        k = max(1, int(flat_mag.shape[0] * (1.0 - sparsity_threshold)))
-        thresh = jax.lax.top_k(flat_mag, k)[0][-1]
-        scaled = jnp.where(mag >= thresh, delta, 0.0) * 100.0
-        floored = jnp.floor(scaled)
-        stoch = floored + (jax.random.uniform(subkey, scaled.shape) < (scaled - floored)).astype(jnp.float32)
-        return base_p + stoch / 100.0
-    subkeys = jax.random.split(key, len(jax.tree_util.tree_leaves(base_params)))
-    return jax.tree_util.tree_map(q_merge, base_params, adapted_params, jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(base_params), subkeys))
+        magnitude = jnp.abs(delta)
+        thresh = jnp.percentile(magnitude, 100.0 * (1.0 - sparsity_threshold))
+        sparse_delta = jnp.where(magnitude >= thresh, delta, 0.0)
+        quantized_delta = jnp.sign(sparse_delta) * jnp.round(jnp.abs(sparse_delta) * 10.0) / 10.0
+        return base_p + quantized_delta
 
-def lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems,
-                                            perturbation_scale=1e-4, key=None, loss=None):
-    key = key if key is not None else jax.random.PRNGKey(0)
-    flat_grads, _ = ravel_pytree(shared_grads)
-    flat_params, unflatten_fn = ravel_pytree(params)
-    dxs = jax.random.normal(jax.random.split(key, 5)[0], (4, flat_params.shape[0])) * perturbation_scale
+    return jax.tree_util.tree_map(q_merge, base_params, adapted_params)
+
+def stream_jacobian_chunks(loss_fn, params, chunk_size=1024):
+    dummy_out = loss_fn(params)
+    flat_out, _ = jax.flatten_util.ravel_pytree(dummy_out)
+    out_dim = flat_out.shape[0]
     
-    loss_fn = lambda p_tree: jnp.mean(jnp.square(gpt_forward(p_tree, noised_input, scales, bpms, stems) - target_output))
-    
-    @jax.jit
-    def grad_mapping(p_flat, dx):
-        _, g_tree = jax.value_and_grad(loss_fn)(unflatten_fn(p_flat + dx))
-        return ravel_pytree(g_tree)[0]
-
-    curvatures = [jnp.abs(jnp.dot(dx, flat_grads) / (jnp.dot(dx, jax.jvp(lambda p: grad_mapping(p, dx), (flat_params,), (dx,))[1]) + 1e-8)) for dx in dxs]
-    clamped = jnp.clip(jnp.mean(jnp.array(curvatures)), 1.0, 2.0)
-    
-    meta_precond = get_meta_preconditioner(shared_grads, loss=loss)
-    factors = jnp.clip(ravel_pytree(meta_precond)[0] * clamped, 1.0, 2.0) if meta_precond is not None else jnp.full_like(flat_grads, clamped)
-    return unflatten_fn(flat_grads * factors)
-
-def push_and_pull_gradients(local_grads, current_params, noised_input, target_output, scales, bpms, stems, loss,
-                             accumulation_steps=100, lie_key=None, quant_key=None):
-    grad_store = "data/shared_gradients.pickle"
-    ckpt_dir = "checkpoints"
-    ckpt_path, prev_ckpt_path = os.path.join(ckpt_dir, "checkpoint_bundle.pickle"), os.path.join(ckpt_dir, "checkpoint_bundle_prev.pickle")
-    os.makedirs("data", exist_ok=True); os.makedirs(ckpt_dir, exist_ok=True)
-
-    with exclusive_lock(UPDATE_LOCK_FILE):
-        try:
-            with open(grad_store, "rb") as f: shared_data = pickle.load(f)
-        except Exception: shared_data = {"accumulated_grads": None, "accumulated_loss": None, "count": 0}
-
-        shared_data["accumulated_grads"] = local_grads if shared_data["accumulated_grads"] is None else jax.tree_util.tree_map(lambda x, y: x + y, shared_data["accumulated_grads"], local_grads)
-        shared_data["accumulated_loss"] = float(loss) if shared_data.get("accumulated_loss") is None else shared_data["accumulated_loss"] + float(loss)
-        shared_data["count"] += 1
-        apply_update = shared_data["count"] >= accumulation_steps
-
-        if apply_update:
-            shared_grads = jax.tree_util.tree_map(lambda x: x / shared_data["count"], shared_data["accumulated_grads"])
-            avg_loss = shared_data["accumulated_loss"] / shared_data["count"]
-            shared_data = {"accumulated_grads": None, "accumulated_loss": None, "count": 0}
+    for start_idx in range(0, out_dim, chunk_size):
+        end_idx = min(start_idx + chunk_size, out_dim)
         
-        atomic_pickle_dump(shared_data, grad_store)
+        def sub_loss_fn(p):
+            res = loss_fn(p)
+            f_res, _ = jax.flatten_util.ravel_pytree(res)
+            return f_res[start_idx:end_idx]
+            
+        _, sub_vjp = jax.vjp(sub_loss_fn, params)
+        chunk_len = end_idx - start_idx
+        
+        def scan_chunk_row(carry, i):
+            unit_vector = jnp.zeros(chunk_len).at[i].set(1.0)
+            grad_cotangent = sub_vjp(unit_vector)
+            flat_g, _ = jax.flatten_util.ravel_pytree(grad_cotangent[0])
+            return carry, flat_g
 
-        if not apply_update:
-            try:
-                with open(ckpt_path, "rb") as f: return pickle.load(f)["params"], False
-            except Exception: return current_params, False
+        _, chunk_jacobian_rows = jax.lax.scan(scan_chunk_row, None, jnp.arange(chunk_len))
+        yield chunk_jacobian_rows
+        del sub_vjp
+        jax.clear_caches()
 
-        try:
-            with open(ckpt_path, "rb") as f: ckpt = pickle.load(f)
-            params, opt_state = ckpt["params"], ckpt["opt_state"]
-        except Exception:
-            params, tx = current_params, optax.adamw(2e-4)
-            opt_state = tx.init(params)
+def push_and_pull_gradients(local_grads, loss_val, accumulation_steps=1000, ntk_fingerprint=None):
+    grad_store_path = "data/shared_gradients.pickle"
+    
+    if ntk_fingerprint is not None:
+        os.makedirs("ntk_logs", exist_ok=True)
+        timestamp_id = int(time.time() * 1000)
+        np.save(f"ntk_logs/ntk_step_{timestamp_id}.npy", np.array(ntk_fingerprint))
 
-        if os.path.exists(ckpt_path): atomic_pickle_dump({"params": params, "opt_state": opt_state}, prev_ckpt_path)
-
-        shared_grads = lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems, key=lie_key, loss=avg_loss)
-        tx = optax.adamw(2e-4)
-        updates, new_opt_state = tx.update(shared_grads, opt_state, params)
-        params = quantize_and_merge_deltas(params, optax.apply_updates(params, updates), quant_key, sparsity_threshold=0.01)
-        atomic_pickle_dump({"params": params, "opt_state": new_opt_state, "timestamp": time.time()}, ckpt_path)
-        return params, True
+    with open(grad_store_path, "a+b" if os.path.exists(grad_store_path) else "w+b") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try: shared_data = pickle.load(f)
+        except: shared_data = {"accumulated_grads": None, "count": 0}
+        if shared_data["accumulated_grads"] is None: shared_data["accumulated_grads"] = local_grads
+        else: shared_data["accumulated_grads"] = jax.tree_util.tree_map(lambda x, y: x + y, shared_data["accumulated_grads"], local_grads)
+        shared_data["count"] += 1
+        apply_global_update = shared_data["count"] >= accumulation_steps
+        if apply_global_update:
+            shared_grads = jax.tree_util.tree_map(lambda x: x / shared_data["count"], shared_data["accumulated_grads"])
+            shared_data = {"accumulated_grads": None, "count": 0} 
+        f.seek(0); f.truncate(); pickle.dump(shared_data, f)
+        fcntl.flock(f, fcntl.LOCK_UN)
+        
+    if apply_global_update:
+        with open(CURR_CKPT, "r+b") as pf:
+            fcntl.flock(pf, fcntl.LOCK_EX)
+            bundle = pickle.load(pf)
+            params = bundle["params"] if isinstance(bundle, dict) and "params" in bundle else bundle
+            
+            preconditioner = get_meta_preconditioner(shared_grads, loss=loss_val)
+            if preconditioner:
+                shared_grads = jax.tree_util.tree_map(lambda g, p: g * p, shared_grads, preconditioner)
+            tx = optax.adam(2e-4)
+            opt_state_path = "checkpoints/opt_state.pickle"
+            opt_state = pickle.load(open(opt_state_path, "rb")) if os.path.exists(opt_state_path) else tx.init(params)
+            updates, new_opt_state = tx.update(shared_grads, opt_state, params)
+            
+            new_params = optax.apply_updates(params, updates)
+            params = quantize_and_merge_deltas(params, new_params, sparsity_threshold=0.01)
+            
+            if os.path.exists(CURR_CKPT):
+                if os.path.exists(PREV_CKPT): os.remove(PREV_CKPT)
+                os.rename(CURR_CKPT, PREV_CKPT)
+                
+            new_bundle = {"params": params}
+            pf.seek(0); pf.truncate(); pickle.dump(new_bundle, pf)
+            pickle.dump(new_opt_state, open(opt_state_path, "wb"))
+            fcntl.flock(pf, fcntl.LOCK_UN)
+            return params, True
+            
+    with open(CURR_CKPT, "rb") as pf:
+        fcntl.flock(pf, fcntl.LOCK_SH)
+        bundle = pickle.load(pf)
+        params = bundle["params"] if isinstance(bundle, dict) and "params" in bundle else bundle
+        fcntl.flock(pf, fcntl.LOCK_UN)
+    return params, False
 
 def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
     meta_path = "data/audio_vault.meta.jsonl"
@@ -159,79 +182,116 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
         if not os.path.exists(meta_path): time.sleep(2); continue
         with open(meta_path, "r") as f: metadata = [json.loads(l) for l in f if l.strip()]
         if not metadata: time.sleep(2); continue
-
+        
         batch, batch_scales, batch_bpms, batch_stems = [], [], [], []
+        
         while len(batch) < batch_size:
             entry = random.choice(metadata)
             shard_path = os.path.join("data", entry["shard"])
             if not os.path.exists(shard_path): continue
-            if entry["shard"] not in mmap_pool:
-                mmap_pool[entry["shard"]] = np.memmap(shard_path, dtype=np.float32, mode='r').reshape(-1, 2)
+            mmap_pool[entry["shard"]] = np.memmap(shard_path, dtype=np.float32, mode='r').reshape(-1, 2)
+            bytes_per_frame = 8  
+            start_idx = int(random.uniform(0, (os.path.getsize(shard_path)//bytes_per_frame / entry["sample_rate"]) - seq_len) * entry["sample_rate"])
+            stem_type = int(entry.get("stem", 0)) 
+            window_id = f"{entry['shard']}:{start_idx}:stem_{stem_type}"
             
-            offset_frames = entry.get("offset_bytes", 0) // 8
-            avail = mmap_pool[entry["shard"]].shape[0] - offset_frames
-            req = seq_len * entry["sample_rate"]
-            if avail <= req: continue
+            if window_id in read_global_state()["processed_windows"]: continue 
+            register_global_window(window_id)
             
-            start_idx = int(random.uniform(0, avail - req))
-            stem_type = int(entry.get("stem", 0))
-            if not register_global_window(f"{entry['shard']}:{start_idx}:stem_{stem_type}"): continue
-
-            latents = [mmap_pool[entry["shard"]][offset_frames + start_idx + i * samples_per_sec : offset_frames + start_idx + (i + 1) * samples_per_sec].flatten() for i in range(seq_len)]
+            offset_frames = entry["offset_bytes"] // bytes_per_frame
+            latents = [
+                mmap_pool[entry["shard"]][offset_frames + start_idx + (i * samples_per_sec) : offset_frames + start_idx + ((i + 1) * samples_per_sec)].flatten()
+                for i in range(seq_len)
+            ]
+            
             batch.append(jnp.stack(latents))
             batch_scales.append(int(entry.get("scale", 0)))
             batch_bpms.append(float(entry.get("bpm", 120.0)))
             batch_stems.append(stem_type)
-
+            
         yield jnp.stack(batch), jnp.array(batch_scales, dtype=jnp.int32), jnp.array(batch_bpms, dtype=jnp.float32), jnp.array(batch_stems, dtype=jnp.int32)
 
 if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
     os.makedirs("checkpoints", exist_ok=True); os.makedirs("ntk_logs", exist_ok=True)
-    ckpt_path = "checkpoints/checkpoint_bundle.pickle"
+    if not os.path.exists(CURR_CKPT):
+        with open(CURR_CKPT, "wb") as f: pickle.dump({"params": init_params(key)}, f)
+    with open(CURR_CKPT, "rb") as f: 
+        bundle = pickle.load(f)
+        params = bundle["params"] if isinstance(bundle, dict) and "params" in bundle else bundle
     
-    if not os.path.exists(ckpt_path):
-        initial_params = init_params(key)
-        tx = optax.adamw(2e-4)
-        with exclusive_lock(UPDATE_LOCK_FILE):
-            if not os.path.exists(ckpt_path):
-                atomic_pickle_dump({"params": initial_params, "opt_state": tx.init(initial_params), "timestamp": time.time()}, ckpt_path)
-                
-    with open(ckpt_path, "rb") as f: params = pickle.load(f)["params"]
-    loader = daemon_memmap_loader(batch_size=1)
-
-    @partial(jax.jit, static_argnames=['noise_scale', 'num_diffusion_steps'])
-    def train_step_optimized(params, batch, scales, bpms, stems, key, noise_scale, num_diffusion_steps=10):
-        k1, k2, k_loop = jax.random.split(key, 3)
-        t = ((jax.random.randint(k1, shape=(batch.shape[0],), minval=0, maxval=num_diffusion_steps).astype(jnp.float32) + 1.0) / float(num_diffusion_steps))[:, None, None]
-        alpha_t, sigma_t = jnp.cos(t * jnp.pi / 2.0), jnp.sin(t * jnp.pi / 2.0)
-        noised = alpha_t * batch + sigma_t * jax.random.normal(k2, batch.shape) * noise_scale
-        
-        loss_fn = lambda p: jnp.mean(jnp.square(gpt_forward(p, noised[:, :-1, :], scales, bpms, stems) - batch[:, 1:, :]))
-        loss, grads = jax.value_and_grad(loss_fn)(params)
-        return loss, grads, k_loop, noised[:, :-1, :], batch[:, 1:, :]
-
-    sample_batch, sample_scales, sample_bpms, sample_stems = next(loader)
-    jaxpr_repr = jax.make_jaxpr(train_step_optimized)(params, sample_batch, sample_scales, sample_bpms, sample_stems, jax.random.split(key)[1], 0.05)
-    with open("checkpoints/train_step.jaxpr", "wb") as f: pickle.dump(jaxpr_repr, f)
-
-    if "--export-jaxpr" in sys.argv:
-        print("JAXPR exported to checkpoints/train_step.jaxpr. Exiting.")
+    dummy_input_x = jnp.zeros((1, 10, 88200))
+    dummy_scale = jnp.array([0], dtype=jnp.int32)
+    dummy_bpm = jnp.array([120.0], dtype=jnp.float32)
+    
+    if "--jaxpr" in sys.argv:
+        print(jax.make_jaxpr(lambda p, x, s, b: gpt_forward(p, x, s, b))(params, dummy_input_x, dummy_scale, dummy_bpm))
         sys.exit(0)
+
+    loader = daemon_memmap_loader(batch_size=1)
+    
+    @partial(jax.jit, static_argnames=['noise_scale', 'max_inner_steps', 'tol', 'num_diffusion_steps'])
+    def train_step_until_zero(params, batch, scales, bpms, stems, key, noise_scale, max_inner_steps=1000, tol=1e-7, num_diffusion_steps=10):
+        k1, k2 = jax.random.split(key)
+        step_indices = jax.random.randint(k1, shape=(batch.shape[0],), minval=0, maxval=num_diffusion_steps)
+        
+        t = (step_indices.astype(jnp.float32) + 1.0) / float(num_diffusion_steps)
+        t = t[:, None, None]
+        alpha_t = jnp.cos(t * jnp.pi / 2.0)
+        sigma_t = jnp.sin(t * jnp.pi / 2.0)
+        
+        noise = jax.random.normal(k2, batch.shape)
+        noised = alpha_t * batch + sigma_t * noise * noise_scale
+        
+        def loss_fn(p):
+            stem_cond = p['stem_emb'][stems]
+            pred_target = gpt_forward(p, noised[:, :-1, :], scales, bpms) + jnp.expand_dims(stem_cond, 1)
+            return jnp.mean(jnp.square(pred_target - batch[:, 1:, :]))
+            
+        def condition_fun(state):
+            p, step_count, loss = state
+            return (step_count < max_inner_steps) & (loss > tol)
+
+        def body_fun(state):
+            p, step_count, loss = state
+            current_loss, grads = jax.value_and_grad(loss_fn)(p)
+            
+            p_updated = {}
+            for k_key, param_val in p.items():
+                if param_val.ndim == 2 and param_val.shape[0] == param_val.shape[1]:
+                    p_updated[k_key] = lie_group_perturbation(param_val, grads[k_key], eps=1e-4)
+                else:
+                    p_updated[k_key] = param_val - 1e-4 * grads[k_key]
+            
+            return p_updated, step_count + 1, current_loss
+
+        initial_loss, _ = jax.value_and_grad(loss_fn)(params)
+        final_params, final_steps, final_loss = jax.lax.while_loop(
+            condition_fun, body_fun, (params, 0, initial_loss)
+        )
+        
+        _, final_grads = jax.value_and_grad(loss_fn)(final_params)
+        
+        chunk_iterator = stream_jacobian_chunks(loss_fn, final_params, chunk_size=512)
+        accumulated_jacobian_features = []
+        for chunk in chunk_iterator:
+            compressed_chunk = jnp.mean(chunk, axis=0)
+            accumulated_jacobian_features.append(compressed_chunk)
+            
+        full_jacobian_vec = jnp.concatenate(accumulated_jacobian_features) if accumulated_jacobian_features else jnp.zeros(1024)
+        jacobian_signature = jnp.pad(full_jacobian_vec, (0, max(0, 1024 - full_jacobian_vec.shape[0])))[:1024]
+        
+        return final_loss, final_grads, jacobian_signature
 
     step = 1
     while True:
         try:
             b_data, b_scales, b_bpms, b_stems = next(loader)
-            key, subkey = jax.random.split(key)
-            loss, grads, key, noised_input, target_output = train_step_optimized(params, b_data, b_scales, b_bpms, b_stems, subkey, 0.05)
-            
-            key, lie_subkey, quant_subkey = jax.random.split(key, 3)
-            params, global_updated = push_and_pull_gradients(grads, params, noised_input, target_output, b_scales, b_bpms, b_stems, loss,
-                                                              accumulation_steps=100, lie_key=lie_subkey, quant_key=quant_subkey)
+            loss, grads, jac_sig = train_step_until_zero(params, b_data, b_scales, b_bpms, b_stems, key, 0.05)
+            params, global_updated = push_and_pull_gradients(grads, loss_val=float(loss), accumulation_steps=100, ntk_fingerprint=jac_sig)
             if global_updated:
-                print(f"[Step {step}] Global Update Applied. Loss: {float(loss):.5f}")
+                print(f"[Step {step}] Update. Converged Loss: {float(loss):.5f}")
                 step += 1
-        except Exception as e:
+        except Exception as e: 
             print(e)
             time.sleep(1)
