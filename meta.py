@@ -5,96 +5,142 @@ import matplotlib.pyplot as plt
 from flax import linen as nn
 from jax.flatten_util import ravel_pytree
 
+CURR_CKPT = "checkpoints/checkpoint_bundle.pickle"
+PREV_CKPT = "checkpoints/checkpoint_bundle_prev.pickle"
+
 def align_drift(w_new, w_old):
     w1, _ = ravel_pytree(w_new)
     w2, _ = ravel_pytree(w_old)
     return jnp.linalg.norm(w1 - w2) / (jnp.linalg.norm(w1) + 1e-6)
 
 class SpectralPreconditionerMLP(nn.Module):
+    fixed_dim: int = 1025
+
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, target_dim=None):
+        if x.shape[-1] != self.fixed_dim:
+            x = jax.image.resize(x, (self.fixed_dim,), 'linear')
+
+        x = nn.Dense(self.fixed_dim)(x)
         x = nn.gelu(nn.Dense(512)(x))
         x = nn.gelu(nn.Dense(512)(x))
-        return jax.nn.sigmoid(nn.Dense(1025)(x)) * 2.0 
+        scales = jax.nn.sigmoid(nn.Dense(self.fixed_dim)(x)) * 2.0
+
+        if target_dim is not None and target_dim != self.fixed_dim:
+            scales = jax.image.resize(scales, (target_dim,), 'linear')
+        return scales
 
 class MetaDashboard:
     def __init__(self):
-        plt.ion()
-        self.fig, self.ax = plt.subplots(figsize=(7, 4))
-        self.losses = []
-    
-    def update(self, loss):
-        self.losses.append(loss)
-        self.ax.clear()
-        self.ax.plot(self.losses, color='#8b5cf6', label='Meta-Loss (Preconditioner MSE)')
-        self.ax.set_title("Manifold-Aware Spectral Preconditioner")
-        plt.draw(); plt.pause(0.01)
+        self.enabled = True
+        try:
+            plt.ion()
+            self.fig, self.ax = plt.subplots(figsize=(7, 4))
+            self.losses = []
+        except Exception:
+            self.enabled = False
 
-def get_meta_preconditioner(grads):
+    def update(self, loss):
+        if not self.enabled:
+            return
+        try:
+            self.losses.append(loss)
+            self.ax.clear()
+            self.ax.plot(self.losses, color='#8b5cf6', label='Meta-Loss (Curvature Variance)')
+            self.ax.set_title("Manifold-Aware Spectral Preconditioner")
+            plt.draw(); plt.pause(0.01)
+        except Exception:
+            self.enabled = False
+
+def _load_params_from_bundle(path):
+    with open(path, "rb") as f:
+        obj = pickle.load(f)
+    return obj["params"] if isinstance(obj, dict) and "params" in obj else obj
+
+def get_meta_preconditioner(grads, loss=None):
     meta_ckpt = "checkpoints/meta_preconditioner.pickle"
-    if not os.path.exists(meta_ckpt): return None
-    
+    if not os.path.exists(meta_ckpt):
+        return None
+
     ntk_files = sorted(glob.glob("ntk_logs/ntk_step_*.npy"))
-    if not ntk_files: return None
-    
-    curr_ckpt = "checkpoints/checkpoint_run.pickle"
-    prev_ckpt = "checkpoints/checkpoint_prev.pickle"
+    if not ntk_files:
+        return None
+
     drift = 0.0
-    if os.path.exists(curr_ckpt) and os.path.exists(prev_ckpt):
-        with open(curr_ckpt, "rb") as f, open(prev_ckpt, "rb") as pf:
-            drift = align_drift(pickle.load(f), pickle.load(pf))
-            
-    ntk_data = jnp.append(jnp.array(jnp.load(ntk_files[-1]).flatten()[:1024]), drift)
-    with open(meta_ckpt, "rb") as f: meta_params = pickle.load(f)
-    
-    model = SpectralPreconditionerMLP()
-    scales = model.apply(meta_params, ntk_data)
-    
+    if os.path.exists(CURR_CKPT) and os.path.exists(PREV_CKPT):
+        try:
+            w_new = _load_params_from_bundle(CURR_CKPT)
+            w_old = _load_params_from_bundle(PREV_CKPT)
+            drift = align_drift(w_new, w_old)
+        except Exception:
+            pass
+
+    loss_val = 0.0 if loss is None else float(loss)
+
+    raw_jac = jnp.array(np.load(ntk_files[-1])).flatten()
+    if raw_jac.shape[0] < 1024:
+        raw_jac = jnp.pad(raw_jac, (0, 1024 - raw_jac.shape[0]))
+    else:
+        raw_jac = raw_jac[:1024]
+
+    ntk_data = jnp.concatenate([raw_jac, jnp.array([drift, loss_val])])
+
+    with open(meta_ckpt, "rb") as f:
+        meta_params = pickle.load(f)
+
     flat_grads, treedef = ravel_pytree(grads)
-    
-    if scales.shape[0] != flat_grads.shape[0]:
-        scales = jax.image.resize(scales, (flat_grads.shape[0],), 'linear')
-        
+    target_dim = flat_grads.shape[0]
+
+    model = SpectralPreconditionerMLP()
+    scales = model.apply(meta_params, ntk_data, target_dim=target_dim)
+
     scaled_flat = flat_grads * scales
     return treedef(scaled_flat)
 
 @jax.jit
-def train_step(state, inputs):
-    def loss_fn(params):
-        pred_scales = SpectralPreconditionerMLP().apply(params, inputs)
-        return jnp.mean(jnp.square(pred_scales - jnp.ones_like(pred_scales)))
-    
-    def scan_body(carry, x):
-        st, _ = carry
-        loss, grads = jax.value_and_grad(loss_fn)(st['params'])
-        updates, new_opt_state = st['tx'].update(grads, st['opt_state'])
-        new_params = optax.apply_updates(st['params'], updates)
-        new_st = {'params': new_params, 'opt_state': new_opt_state, 'tx': st['tx']}
-        return (new_st, loss), loss
+def train_step(params, opt_state, tx, inputs):
+    def loss_fn(p):
+        pred_scales = SpectralPreconditionerMLP().apply(p, inputs)
+        jac_diag = inputs[:1024]
+        effective_curvature = pred_scales[:jac_diag.shape[0]] * jac_diag
+        mean_curv = jnp.mean(effective_curvature)
+        return jnp.var(effective_curvature) + 0.1 * jnp.square(mean_curv - 1.0)
 
-    (state, final_loss), _ = jax.lax.scan(scan_body, (state, 0.0), xs=None, length=1)
-    return final_loss, state
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    updates, new_opt_state = tx.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    return loss, new_params, new_opt_state
 
 def run_meta_daemon():
-    print("[META-DAEMON] Initializing Manifold-Aware Preconditioner...")
+    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs("ntk_logs", exist_ok=True)
     dashboard = MetaDashboard()
-    state = None 
-    
+    params, opt_state, tx = None, None, optax.adam(1e-4)
+
     while True:
         ntk_files = sorted(glob.glob("ntk_logs/ntk_step_*.npy"))
         if len(ntk_files) > 0:
-            if state is None:
-                dummy_input = jnp.zeros(1025)
-                meta_params = SpectralPreconditionerMLP().init(jax.random.PRNGKey(0), dummy_input)
-                tx = optax.adam(1e-4)
-                state = {'params': meta_params, 'opt_state': tx.init(meta_params), 'tx': tx}
-            
-            ntk_data = jnp.load(ntk_files[-1]).flatten()[:1024]
-            loss, state = train_step(state, jnp.append(ntk_data, 0.0))
-            
-            dashboard.update(float(loss))
-            with open("checkpoints/meta_preconditioner.pickle", "wb") as f:
-                pickle.dump(state['params'], f)
+            try:
+                raw_jac = jnp.array(np.load(ntk_files[-1])).flatten()
+                if raw_jac.shape[0] < 1024:
+                    raw_jac = jnp.pad(raw_jac, (0, 1024 - raw_jac.shape[0]))
+                else:
+                    raw_jac = raw_jac[:1024]
+
+                ntk_data = jnp.concatenate([raw_jac, jnp.array([0.0, 0.0])])
+
+                if params is None:
+                    dummy_input = jnp.zeros(1025)
+                    params = SpectralPreconditionerMLP().init(jax.random.PRNGKey(0), dummy_input)
+                    opt_state = tx.init(params)
+
+                loss, params, opt_state = train_step(params, opt_state, tx, ntk_data)
+
+                dashboard.update(float(loss))
+                with open("checkpoints/meta_preconditioner.pickle", "wb") as f:
+                    pickle.dump(params, f)
+            except Exception:
+                pass
         time.sleep(5)
 
 if __name__ == "__main__":
