@@ -1,5 +1,6 @@
 import os, json, pickle, sys, jax, optax, random, time, numpy as np, contextlib
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 from functools import partial
 from meta import get_meta_preconditioner
 import fcntl
@@ -88,8 +89,8 @@ def quantize_and_merge_deltas(base_params, adapted_params, key, sparsity_thresho
 def lie_group_perturbation_matching_update(params, shared_grads, noised_input, target_output, scales, bpms, stems,
                                             perturbation_scale=1e-4, key=None, loss=None):
     key = key if key is not None else jax.random.PRNGKey(0)
-    flat_grads, _ = jax.flatten_util.ravel_pytree(shared_grads)
-    flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
+    flat_grads, _ = ravel_pytree(shared_grads)
+    flat_params, unflatten_fn = ravel_pytree(params)
     dxs = jax.random.normal(jax.random.split(key, 5)[0], (4, flat_params.shape[0])) * perturbation_scale
     
     loss_fn = lambda p_tree: jnp.mean(jnp.square(gpt_forward(p_tree, noised_input, scales, bpms, stems) - target_output))
@@ -97,15 +98,13 @@ def lie_group_perturbation_matching_update(params, shared_grads, noised_input, t
     @jax.jit
     def grad_mapping(p_flat, dx):
         _, g_tree = jax.value_and_grad(loss_fn)(unflatten_fn(p_flat + dx))
-        return jax.flatten_util.ravel_pytree(g_tree)[0]
+        return ravel_pytree(g_tree)[0]
 
     curvatures = [jnp.abs(jnp.dot(dx, flat_grads) / (jnp.dot(dx, jax.jvp(lambda p: grad_mapping(p, dx), (flat_params,), (dx,))[1]) + 1e-8)) for dx in dxs]
     clamped = jnp.clip(jnp.mean(jnp.array(curvatures)), 1.0, 2.0)
     
-    # loss is passed through so the meta module can use it as a supervised
-    # target / outcome signal instead of only seeing NTK statistics + drift.
     meta_precond = get_meta_preconditioner(shared_grads, loss=loss)
-    factors = jnp.clip(jax.flatten_util.ravel_pytree(meta_precond)[0] * clamped, 1.0, 2.0) if meta_precond is not None else jnp.full_like(flat_grads, clamped)
+    factors = jnp.clip(ravel_pytree(meta_precond)[0] * clamped, 1.0, 2.0) if meta_precond is not None else jnp.full_like(flat_grads, clamped)
     return unflatten_fn(flat_grads * factors)
 
 def push_and_pull_gradients(local_grads, current_params, noised_input, target_output, scales, bpms, stems, loss,
