@@ -29,7 +29,7 @@ $$f(x; \theta) = W_{\text{up2}} \cdot \sigma(W_{\text{up1}} \cdot \text{LN}(h + 
 
 ### `model.py` + `meta.py`
 
-The global training regime interleaves inner gradient alignment loops with outer meta-preconditioned updates and manifold-aware parameter projections:
+The global training iteration interleaves inner gradient alignment loops with outer meta-preconditioned updates and manifold-aware parameter projections:
 
 $$\text{Inner Loop (While-Loop Convergence)}: \quad \theta^{(k+1)} = \theta^{(k)} - \eta \cdot \nabla_\theta \mathcal{L}_{\text{diff}}(\theta^{(k)})$$
 
@@ -48,6 +48,21 @@ $$\text{Manifold Lie Group Correction (Square Weights)}: \quad W^{(l)}_{t+1} = W
 * **$\text{Quantize}(\cdot)$**: Sparsity-thresholded decimal quantization mapping adapter deltas back onto base layers.
 * **$\text{exptm}$**: Matrix exponential operator for Lie group manifold traversal.
 * **$\text{skew}(G)$**: Skew-symmetric tensor projection ($0.5(G - G^\top)$).
+
+---
+
+### Gradient Checkpointing & Quantization
+
+$$\text{Gradient Checkpointing}: \quad h_l = f_l\left(f_{l-1}\left(\dots \text{checkpoint}(h_k) \dots \right)\right) \quad \text{s.t.} \quad \text{Memory}_{\text{act}} = \mathcal{O}\left(\frac{L}{\sqrt{K}}\right)$$
+
+$$\text{Quantization}: \quad \theta_{t+1}^{\text{quant}} = \Delta \cdot \text{round}\left( \frac{\theta_t - \eta \cdot \left[ P(\xi_t; \phi) \odot \nabla L_t \right]}{\Delta} \right)$$
+
+#### Symbols:
+
+* **$h_l, h_k$**: Intermediate activation tensors at layers $l$ and checkpoint boundary $k$.
+* **$L$**: Total transformer layer depth.
+* **$\Delta$**: Quantization step size grid resolution.
+* **$\text{round}(\cdot)$**: Nearest integer projection operator for low-precision parameter representation.
 
 ---
 
