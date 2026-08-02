@@ -27,24 +27,27 @@ $$f(x; \theta) = W_{\text{up2}} \cdot \sigma(W_{\text{up1}} \cdot \text{LN}(h + 
 
 ---
 
-### Unified Manifold-Aware Preconditioned Dynamics (Model + Meta Model)
+### Unified Control Flow & Hybrid Optimization Dynamics (`model.py` + `meta.py`)
 
-The global parameter update combines the streaming chunked Jacobian signature, the spectral preconditioner mapping, and manifold-aware Lie group perturbation matching for square weight matrices:
+The global training iteration interleaves inner gradient alignment loops with outer meta-preconditioned updates and manifold-aware parameter projections:
 
-$$\theta_{t+1} = \text{Quantize}\left( \theta_t - \eta \cdot \left[ P(\xi_t; \phi) \odot \nabla L_t \right] + \Delta \theta_{\text{manifold}} \right)$$
+$$\text{Inner Loop (While-Loop Convergence)}: \quad \theta^{(k+1)} = \theta^{(k)} - \eta \cdot \nabla_\theta \mathcal{L}_{\text{diff}}(\theta^{(k)})$$
 
-For square weight tensors residing on a matrix Lie group manifold:
+$$\text{Streaming Jacobian Signature Extraction}: \quad \xi_t = \text{pad}\left( \frac{1}{\vert{}C_i\vert{}} \sum_{r \in C_i} J_r, 1024 \right) \oplus [\delta_t, L_t]$$
 
-$$W^{(l)}_{t+1} = W^{(l)}_t \cdot \text{exptm}\left(-\epsilon_{\text{lie}} \cdot \text{skew}\left(\nabla_{W^{(l)}} L_t \odot P_l\right)\right)$$
+$$\text{Meta-Preconditioned Global Update}: \quad \theta_{t+1} = \text{Quantize}\left( \theta_t - \eta \cdot \left[ P(\xi_t; \phi) \odot \nabla L_t \right] \right)$$
 
-$$\text{skew}(G) = \frac{1}{2} \left( G - G^\top \right)$$
+$$\text{Manifold Lie Group Correction (Square Weights)}: \quad W^{(l)}_{t+1} = W^{(l)}_t \cdot \text{exptm}\left(-\epsilon_{\text{lie}} \cdot \text{skew}\left(\nabla_{W^{(l)}} L_t\right)\right)$$
 
 #### Symbols:
 
-* **$\eta$**: Base learning rate ($2 \cdot 10^{-4}$).
-* **$\text{exptm}$**: Matrix exponential operator mapping tangent space updates back to the Lie group manifold.
-* **$\text{skew}(G)$**: Skew-symmetric projection operator ensuring tangent vector alignment with rotation/scaling generators.
-* **$\epsilon_{\text{lie}}$**: Manifold step size scaling ($10^{-4}$).
+* **$\mathcal{L}_{\text{diff}}$**: Diffusion-denoising mean squared error loss over paired audio latents.
+* **$C_i$**: Chunk indices streamed via `jax.lax.scan` during reverse-mode VJP Jacobian evaluation.
+* **$J_r$**: Jacobian row slices computed via cotangent vector probing.
+* **$\delta_t$**: Normalized parameter drift metric ($\frac{\Vert \theta_t - \theta_{t-1} \Vert_2}{\Vert \theta_t \Vert_2 + \epsilon}$).
+* **$\text{Quantize}(\cdot)$**: Sparsity-thresholded decimal quantization mapping adapter deltas back onto base layers.
+* **$\text{exptm}$**: Matrix exponential operator for Lie group manifold traversal.
+* **$\text{skew}(G)$**: Skew-symmetric tensor projection ($0.5(G - G^\top)$).
 
 ---
 
