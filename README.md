@@ -7,7 +7,8 @@ infinite-width CALM Attention Network ⚠️
 * `./setup-cdk.sh && aws configure`
 * `cdk bootstrap && cdk deploy --profile` (Dashboard: `http://localhost:8000/dashboard.png`)
 
---- 
+---
+
 ### Model
 
 $$f(x; \theta) = W_{\text{up2}} \cdot \sigma(W_{\text{up1}} \cdot \text{LN}(h + \text{FF}(h)))$$
@@ -23,7 +24,28 @@ $$f(x; \theta) = W_{\text{up2}} \cdot \sigma(W_{\text{up1}} \cdot \text{LN}(h + 
 * **$\sigma$**: The GELU (Gaussian Error Linear Unit) activation function.
 * **$W_{\text{up1}}$**: The weight matrix of the first layer of the final up-projection network.
 * **$W_{\text{up2}}$**: The weight matrix of the second (final) layer of the up-projection network, outputting the dual-stem (vocal + instrumental) audio data.
-  
+
+---
+
+### Unified Manifold-Aware Preconditioned Dynamics (Model + Meta Model)
+
+The global parameter update combines the streaming chunked Jacobian signature, the spectral preconditioner mapping, and manifold-aware Lie group perturbation matching for square weight matrices:
+
+$$\theta_{t+1} = \text{Quantize}\left( \theta_t - \eta \cdot \left[ P(\xi_t; \phi) \odot \nabla L_t \right] + \Delta \theta_{\text{manifold}} \right)$$
+
+For square weight tensors residing on a matrix Lie group manifold:
+
+$$W^{(l)}_{t+1} = W^{(l)}_t \cdot \text{exptm}\left(-\epsilon_{\text{lie}} \cdot \text{skew}\left(\nabla_{W^{(l)}} L_t \odot P_l\right)\right)$$
+
+$$\text{skew}(G) = \frac{1}{2} \left( G - G^\top \right)$$
+
+#### Symbols:
+
+* **$\eta$**: Base learning rate ($2 \cdot 10^{-4}$).
+* **$\text{exptm}$**: Matrix exponential operator mapping tangent space updates back to the Lie group manifold.
+* **$\text{skew}(G)$**: Skew-symmetric projection operator ensuring tangent vector alignment with rotation/scaling generators.
+* **$\epsilon_{\text{lie}}$**: Manifold step size scaling ($10^{-4}$).
+
 ---
 
 ### Neural Tangent Kernel (NTK)
@@ -33,18 +55,16 @@ The NTK matrix $\Theta_t$ tracks how the network's output function generalizes a
 $$\Theta_t(x, x') = \sum_{k=1}^{P} \frac{\partial f(x; \theta_t)}{\partial \theta_k} \otimes \frac{\partial f(x'; \theta_t)}{\partial \theta_k}$$
 
 #### Symbols:
+
 * **$\Theta_t(x, x')$**: The Neural Tangent Kernel value evaluating the structural similarity between inputs $x$ and $x'$ at step $t$.
 * **$P$**: The total number of scalar parameters in the network.
 * **$\theta_k$**: An individual scalar parameter weight within the active model parameters $\theta_t$.
 * **$\frac{\partial f(x; \theta_t)}{\partial \theta_k}$**: The partial derivative (gradient Jacobian) of the model's prediction with respect to parameter $\theta_k$.
 * **$\otimes$**: The Kronecker (or outer) product tensor operator, which matches the output features of the audio tokens.
 
-
 ---
+
 ### `meta.py` (Spectral Preconditioner)
-
-<img width="762" height="247" alt="image" src="https://github.com/user-attachments/assets/15c2c707-4096-4a8c-a527-c07fd0116e6f" />
-
 
 $$\Delta \theta_t = P(\xi_t; \phi) \odot \nabla L_t$$
 
@@ -85,7 +105,6 @@ Definition: $D_{\text{samples}} \ge \kappa(\Theta^\infty) \cdot \ln(1/\epsilon)$
 
 ---
 
-
 $$\hat{f} = \arg\min_{f \in \mathcal{H}_{\Theta^\infty}} \frac{1}{N_{\text{songs}}} \sum_{i=1}^{N_{\text{songs}}} \left( y_i - f(x_i) \right)^2 + \lambda_{\text{reg}} \Vert{}f\Vert{}_{\mathcal{H}_{\Theta^\infty}}^2$$
 
 $$\text{\scriptsize (kernel ridge regression)}$$
@@ -117,7 +136,7 @@ $\blacksquare$
 * $\mu_j, \phi_j$: Eigenvalues and eigenfunctions.
 * $d_{\text{attn}}$: Internal attention feature dimension ($4096$).
 
-#### Hyper-Parameters (8GB VRAM Constraint)
+#### Hyper-Parameters (32GB VRAM Scaling Constraint)
 
 * **a) FFNN iterations ($T_{\text{sec}}$)**: $I_{\text{iter}}(T_{\text{sec}}) \approx 92 \cdot T_{\text{sec}}$ ($921$ iterations for $10\text{s}$).
 * **b) Attention head size**: $d_{\text{attn}} = 4096$ ($16$ heads, $d_{\text{head}} = 256$).
