@@ -1,4 +1,4 @@
-infinite-width CALM Attention Network ⚠️
+infinite-width CALM Transformer ⚠️
 
 ---
 
