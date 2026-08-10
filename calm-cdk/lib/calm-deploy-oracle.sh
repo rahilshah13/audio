@@ -5,7 +5,7 @@ set -euo pipefail
 COMPARTMENT_ID="${COMPARTMENT_ID:-ocid1.compartment.oc1..your_compartment_ocid}"
 SSH_PUBLIC_KEY_FILE="${SSH_PUBLIC_KEY_FILE:-$HOME/.ssh/id_rsa.pub}"
 SSH_PRIVATE_KEY_FILE="${SSH_PRIVATE_KEY_FILE:-$HOME/.ssh/id_rsa}"
-LOCAL_SRC_DIR="${LOCAL_SRC_DIR:-../}"
+LOCAL_SRC_DIR="${LOCAL_SRC_DIR:-../../}"
 BUCKET_NAME="alpine-image-bucket"
 ALPINE_VERSION="3.20.0"
 IMAGE_FILENAME="nocloud_alpine-${ALPINE_VERSION}-aarch64-uefi-cloudinit-r0.qcow2"
