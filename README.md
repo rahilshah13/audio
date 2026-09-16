@@ -1,7 +1,3 @@
-infinite-width CALM Transformer ⚠️🏗🚧
-
----
-
 ### deploy
 
 * `./setup-cdk.sh && aws configure`
