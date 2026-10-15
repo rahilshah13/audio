@@ -80,13 +80,24 @@ def register_global_window(window_str):
         f.seek(0); f.truncate(); json.dump(data, f)
         fcntl.flock(f, fcntl.LOCK_UN)
 
-def quantize_and_merge_deltas(base_params, adapted_params, sparsity_threshold=0.01):
+def cauchy_binning_and_merge_deltas(base_params, adapted_params, gamma=0.1, num_bins=16):
+    """
+    Quantizes parameter deltas using non-uniform Cauchy-spaced bins to 
+    gracefully preserve heavy-tailed outlier updates.
+    """
     def q_merge(base_p, adapt_p):
         delta = adapt_p - base_p
-        magnitude = jnp.abs(delta)
-        thresh = jnp.percentile(magnitude, 100.0 * (1.0 - sparsity_threshold))
-        sparse_delta = jnp.where(magnitude >= thresh, delta, 0.0)
-        quantized_delta = jnp.sign(sparse_delta) * jnp.round(jnp.abs(sparse_delta) * 10.0) / 10.0
+        
+        # 1. Map delta to probability space [0, 1] via Cauchy CDF
+        cdf_vals = (1.0 / jnp.pi) * jnp.arctan(delta / gamma) + 0.5
+        
+        # 2. Quantize into discrete bins in probability space
+        quantized_cdf = jnp.round(cdf_vals * num_bins) / num_bins
+        quantized_cdf = jnp.clip(quantized_cdf, 1.0 / (2.0 * num_bins), 1.0 - (1.0 / (2.0 * num_bins)))
+        
+        # 3. Map back to parameter space using the Cauchy Inverse CDF
+        quantized_delta = gamma * jnp.tan(jnp.pi * (quantized_cdf - 0.5))
+        
         return base_p + quantized_delta
 
     return jax.tree_util.tree_map(q_merge, base_params, adapted_params)
@@ -156,7 +167,8 @@ def push_and_pull_gradients(local_grads, loss_val, accumulation_steps=1000, ntk_
             updates, new_opt_state = tx.update(shared_grads, opt_state, params)
             
             new_params = optax.apply_updates(params, updates)
-            params = quantize_and_merge_deltas(params, new_params, sparsity_threshold=0.01)
+            # Replaced linear uniform quantization with Cauchy binning
+            params = cauchy_binning_and_merge_deltas(params, new_params, gamma=0.1, num_bins=16)
             
             if os.path.exists(CURR_CKPT):
                 if os.path.exists(PREV_CKPT): os.remove(PREV_CKPT)
@@ -211,6 +223,49 @@ def daemon_memmap_loader(batch_size, seq_len=10, samples_per_sec=44100):
             
         yield jnp.stack(batch), jnp.array(batch_scales, dtype=jnp.int32), jnp.array(batch_bpms, dtype=jnp.float32), jnp.array(batch_stems, dtype=jnp.int32)
 
+def run_cauchy_grid_search(params, b_data, b_scales, b_bpms, b_stems, key):
+    gamma_candidates = [0.01, 0.1, 0.5, 1.0]
+    bin_candidates = [8, 16, 32, 64]
+    
+    results = []
+    print("\n--- Starting Cauchy Quantization Grid Search ---")
+    
+    for gamma in gamma_candidates:
+        for num_bins in bin_candidates:
+            start_time = time.time()
+            
+            def test_cauchy_merge(base_p, adapt_p):
+                def q_merge(base_p, adapt_p):
+                    delta = adapt_p - base_p
+                    cdf_vals = (1.0 / jnp.pi) * jnp.arctan(delta / gamma) + 0.5
+                    quantized_cdf = jnp.round(cdf_vals * num_bins) / num_bins
+                    quantized_cdf = jnp.clip(quantized_cdf, 1.0 / (2.0 * num_bins), 1.0 - (1.0 / (2.0 * num_bins)))
+                    quantized_delta = gamma * jnp.tan(jnp.pi * (quantized_cdf - 0.5))
+                    return base_p + quantized_delta
+                return jax.tree_util.tree_map(q_merge, base_p, adapt_p)
+
+            def loss_fn(p):
+                stem_cond = p['stem_emb'][b_stems]
+                pred_target = gpt_forward(p, b_data[:, :-1, :], b_scales, b_bpms) + jnp.expand_dims(stem_cond, 1)
+                return jnp.mean(jnp.square(pred_target - b_data[:, 1:, :]))
+
+            _, grads = jax.value_and_grad(loss_fn)(params)
+            tx = optax.adam(2e-4)
+            opt_state = tx.init(params)
+            updates, _ = tx.update(grads, opt_state, params)
+            new_params = optax.apply_updates(params, updates)
+            
+            quantized_params = test_cauchy_merge(params, new_params)
+            final_loss = loss_fn(quantized_params)
+            duration = time.time() - start_time
+            
+            results.append({"gamma": gamma, "bins": num_bins, "loss": float(final_loss)})
+            print(f"Gamma: {gamma:<5} | Bins: {num_bins:<3} | Loss: {float(final_loss):.6f} | Time: {duration:.3f}s")
+            
+    best_config = min(results, key=lambda x: x["loss"])
+    print(f"\nBest Configuration Found -> Gamma: {best_config['gamma']}, Bins: {best_config['bins']} (Loss: {best_config['loss']:.6f})\n")
+    return best_config
+
 if __name__ == "__main__":
     key = jax.random.PRNGKey(42)
     os.makedirs("checkpoints", exist_ok=True); os.makedirs("ntk_logs", exist_ok=True)
@@ -229,6 +284,11 @@ if __name__ == "__main__":
         sys.exit(0)
 
     loader = daemon_memmap_loader(batch_size=1)
+    
+    # Optional tuning run on startup if requested via flag
+    if "--tune-quant" in sys.argv:
+        sample_batch, sample_scales, sample_bpms, sample_stems = next(loader)
+        run_cauchy_grid_search(params, sample_batch, sample_scales, sample_bpms, sample_stems, key)
     
     @partial(jax.jit, static_argnames=['noise_scale', 'max_inner_steps', 'tol', 'num_diffusion_steps'])
     def train_step_until_zero(params, batch, scales, bpms, stems, key, noise_scale, max_inner_steps=1000, tol=1e-7, num_diffusion_steps=10):
